@@ -1,0 +1,3 @@
+[workspace]
+members = ["train-server"]
+resolver = "2"
