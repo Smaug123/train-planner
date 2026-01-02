@@ -5,3 +5,4 @@
 
 pub mod darwin;
 pub mod domain;
+pub mod walkable;
