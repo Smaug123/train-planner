@@ -12,4 +12,4 @@ mod search;
 
 pub use config::SearchConfig;
 pub use rank::rank_journeys;
-pub use search::{Planner, SearchError, SearchRequest, SearchResult};
+pub use search::{Planner, SearchError, SearchRequest, SearchResult, ServiceProvider};

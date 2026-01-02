@@ -706,3 +706,157 @@ mod tests {
         assert_eq!(result.candidate.headcode, None);
     }
 }
+
+/// Tests that demonstrate bugs in the current implementation.
+/// These tests are expected to FAIL until the bugs are fixed.
+#[cfg(test)]
+mod bug_tests {
+    use super::*;
+    use crate::darwin::types::ArrayOfCallingPoints;
+
+    fn date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+    }
+
+    fn make_calling_point(name: &str, crs: &str, st: &str) -> CallingPoint {
+        CallingPoint {
+            location_name: name.to_string(),
+            crs: crs.to_string(),
+            st: Some(st.to_string()),
+            et: None,
+            at: None,
+            is_cancelled: None,
+            length: None,
+            cancel_reason: None,
+            delay_reason: None,
+        }
+    }
+
+    /// BUG: When board station has no std (departure time), subsequent calling point
+    /// midnight rollover detection may fail.
+    ///
+    /// The parse_subsequent_calling_points function prepends board_std to detect
+    /// midnight crossings. If board_std is None, the first subsequent stop has no
+    /// anchor for rollover detection.
+    #[test]
+    fn bug_subsequent_rollover_with_no_board_std() {
+        use crate::darwin::types::ServiceLocation;
+
+        // Create a service item where the board station has arrival but no departure
+        // (e.g., a terminus where you're arriving, not departing)
+        let mut item = ServiceItemWithCallingPoints {
+            service_id: "NIGHT".to_string(),
+            rsid: None,
+            sta: Some("23:50".to_string()), // Arrival time only
+            eta: Some("On time".to_string()),
+            std: None, // No departure time!
+            etd: None,
+            platform: Some("1".to_string()),
+            operator: Some("Test".to_string()),
+            operator_code: None,
+            is_cancelled: Some(false),
+            service_type: None,
+            length: None,
+            origin: None,
+            destination: Some(vec![ServiceLocation {
+                location_name: "Edinburgh".to_string(),
+                crs: "EDI".to_string(),
+                via: None,
+                future_change_to: None,
+            }]),
+            previous_calling_points: None,
+            subsequent_calling_points: Some(vec![ArrayOfCallingPoints {
+                calling_point: vec![
+                    // First subsequent is after midnight
+                    make_calling_point("Edinburgh", "EDI", "00:30"),
+                ],
+                service_type: None,
+                service_change_required: None,
+                assoc_is_cancelled: None,
+            }]),
+            cancel_reason: None,
+            delay_reason: None,
+        };
+
+        // Board at York at 23:50, but no std means the subsequent call at 00:30
+        // has no anchor for midnight detection
+        let board_crs = Crs::parse("YRK").unwrap();
+        let result = convert_service_item(&item, &board_crs, "York", date());
+
+        // The conversion might fail or misattribute the date
+        assert!(result.is_ok(), "Conversion should succeed even without std");
+
+        let service = result.unwrap().service;
+        let edi_call = service.calls.last().unwrap();
+
+        // The Edinburgh call at 00:30 should be on the next day (March 16)
+        // because we're boarding at 23:50. Without std as anchor, this may be wrong.
+        let expected_date = NaiveDate::from_ymd_opt(2024, 3, 16).unwrap();
+        assert_eq!(
+            edi_call.booked_departure.unwrap().date(),
+            expected_date,
+            "Edinburgh at 00:30 should be on next day, but midnight rollover failed"
+        );
+    }
+
+    /// BUG: Subsequent calling points use departure times for all stops.
+    ///
+    /// The calling_point_to_call function always sets booked_departure,
+    /// but the final destination should have an arrival time, not departure.
+    #[test]
+    fn bug_final_destination_has_departure_not_arrival() {
+        use crate::darwin::types::ServiceLocation;
+
+        let mut item = ServiceItemWithCallingPoints {
+            service_id: "ABC".to_string(),
+            rsid: None,
+            sta: None,
+            eta: None,
+            std: Some("10:00".to_string()),
+            etd: Some("On time".to_string()),
+            platform: Some("1".to_string()),
+            operator: Some("Test".to_string()),
+            operator_code: None,
+            is_cancelled: Some(false),
+            service_type: None,
+            length: None,
+            origin: None,
+            destination: Some(vec![ServiceLocation {
+                location_name: "Bristol".to_string(),
+                crs: "BRI".to_string(),
+                via: None,
+                future_change_to: None,
+            }]),
+            previous_calling_points: None,
+            subsequent_calling_points: Some(vec![ArrayOfCallingPoints {
+                calling_point: vec![
+                    make_calling_point("Reading", "RDG", "10:30"),
+                    make_calling_point("Bristol", "BRI", "11:00"), // This is arrival, not departure!
+                ],
+                service_type: None,
+                service_change_required: None,
+                assoc_is_cancelled: None,
+            }]),
+            cancel_reason: None,
+            delay_reason: None,
+        };
+
+        let board_crs = Crs::parse("PAD").unwrap();
+        let result = convert_service_item(&item, &board_crs, "Paddington", date()).unwrap();
+
+        let bristol_call = result.service.calls.last().unwrap();
+
+        // Bristol is the terminus - it should have an arrival time, not departure
+        // The time "11:00" represents arrival at the final destination
+        assert!(
+            bristol_call.booked_arrival.is_some(),
+            "Final destination should have booked_arrival set"
+        );
+
+        // It should NOT have a departure time (you don't depart from the terminus)
+        assert!(
+            bristol_call.booked_departure.is_none(),
+            "Final destination should NOT have booked_departure set"
+        );
+    }
+}

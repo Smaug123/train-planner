@@ -547,3 +547,256 @@ mod tests {
         assert_eq!(legs[1].board_station(), &crs("RDG"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::{Call, CallIndex, Service, ServiceRef};
+    use chrono::{NaiveDate, NaiveTime};
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    fn fixed_date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+    }
+
+    fn make_time(hour: u32, min: u32) -> RailTime {
+        let time = NaiveTime::from_hms_opt(hour % 24, min % 60, 0).unwrap();
+        RailTime::new(fixed_date(), time)
+    }
+
+    fn crs_from_idx(i: usize) -> Crs {
+        let c1 = b'A' + ((i / 676) % 26) as u8;
+        let c2 = b'A' + ((i / 26) % 26) as u8;
+        let c3 = b'A' + (i % 26) as u8;
+        let s = format!("{}{}{}", c1 as char, c2 as char, c3 as char);
+        Crs::parse(&s).unwrap()
+    }
+
+    /// Generate a valid service from station i to station i+1 with given times.
+    fn make_simple_service(
+        station_idx: usize,
+        dep_mins: u16,
+        duration_mins: u16,
+    ) -> Arc<Service> {
+        let from_crs = crs_from_idx(station_idx);
+        let to_crs = crs_from_idx(station_idx + 1);
+
+        let dep_hour = (dep_mins / 60) as u32 % 24;
+        let dep_min = (dep_mins % 60) as u32;
+        let arr_mins = dep_mins + duration_mins;
+        let arr_hour = (arr_mins / 60) as u32 % 24;
+        let arr_min = (arr_mins % 60) as u32;
+
+        let mut call1 = Call::new(from_crs, format!("Station {}", station_idx));
+        call1.booked_departure = Some(make_time(dep_hour, dep_min));
+
+        let mut call2 = Call::new(to_crs, format!("Station {}", station_idx + 1));
+        call2.booked_arrival = Some(make_time(arr_hour, arr_min));
+
+        Arc::new(Service {
+            service_ref: ServiceRef::new(format!("SVC{}", station_idx), from_crs),
+            headcode: None,
+            operator: "Test".into(),
+            operator_code: None,
+            calls: vec![call1, call2],
+            board_station_idx: CallIndex(0),
+        })
+    }
+
+    /// Strategy for generating a chain of connected legs.
+    /// Returns a vec of (station_idx, departure_mins, duration_mins) tuples.
+    fn connected_legs_params(max_legs: usize) -> impl Strategy<Value = Vec<(usize, u16, u16)>> {
+        (1usize..=max_legs).prop_flat_map(|num_legs| {
+            proptest::collection::vec(
+                (
+                    0usize..100,      // station_idx (will be adjusted to be sequential)
+                    0u16..1300,       // dep_mins
+                    10u16..120,       // duration
+                ),
+                num_legs,
+            )
+        })
+    }
+
+    /// Build a journey from leg parameters, ensuring times are sequential.
+    fn build_journey_from_params(params: &[(usize, u16, u16)]) -> Option<Journey> {
+        if params.is_empty() {
+            return None;
+        }
+
+        let mut legs = Vec::new();
+        let mut current_station = 0usize;
+        // Use the first param's dep_mins but constrain to avoid wrapping
+        let mut current_time_mins = params[0].1.min(600); // Start no later than 10:00
+
+        for &(_, _, duration) in params.iter() {
+            // Ensure time progresses and doesn't exceed day boundary
+            // to avoid times wrapping and confusing the comparisons
+            if current_time_mins + duration >= 1440 {
+                // Would wrap past midnight - reject this case
+                return None;
+            }
+
+            let service = make_simple_service(current_station, current_time_mins, duration);
+            let leg = Leg::new(service, CallIndex(0), CallIndex(1)).ok()?;
+            legs.push(leg);
+
+            // Next leg starts at next station, after some connection time
+            current_station += 1;
+            current_time_mins = current_time_mins + duration + 10; // 10 min connection
+        }
+
+        Journey::from_legs(legs, |_, _| None).ok()
+    }
+
+    proptest! {
+        /// Property: departure_time <= arrival_time for all valid journeys.
+        #[test]
+        fn departure_before_arrival(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                prop_assert!(
+                    journey.departure_time() <= journey.arrival_time(),
+                    "Departure {:?} should be <= arrival {:?}",
+                    journey.departure_time(),
+                    journey.arrival_time()
+                );
+            }
+        }
+
+        /// Property: change_count == leg_count - 1 for journeys with only trains.
+        #[test]
+        fn change_count_is_legs_minus_one(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                let expected_changes = journey.leg_count().saturating_sub(1);
+                prop_assert_eq!(
+                    journey.change_count(),
+                    expected_changes,
+                    "change_count {} != leg_count {} - 1",
+                    journey.change_count(),
+                    journey.leg_count()
+                );
+            }
+        }
+
+        /// Property: total_duration == arrival_time - departure_time.
+        #[test]
+        fn duration_equals_time_difference(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                let expected = journey.arrival_time()
+                    .signed_duration_since(journey.departure_time());
+                prop_assert_eq!(
+                    journey.total_duration(),
+                    expected,
+                    "total_duration {:?} != arrival - departure {:?}",
+                    journey.total_duration(),
+                    expected
+                );
+            }
+        }
+
+        /// Property: origin() == first segment's origin.
+        #[test]
+        fn origin_is_first_segment_origin(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                prop_assert_eq!(
+                    journey.origin(),
+                    journey.segments().first().unwrap().origin()
+                );
+            }
+        }
+
+        /// Property: destination() == last segment's destination.
+        #[test]
+        fn destination_is_last_segment_destination(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                prop_assert_eq!(
+                    journey.destination(),
+                    journey.segments().last().unwrap().destination()
+                );
+            }
+        }
+
+        /// Property: leg_count equals number of train segments.
+        #[test]
+        fn leg_count_equals_train_segments(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                let train_count = journey.segments()
+                    .iter()
+                    .filter(|s| s.is_train())
+                    .count();
+                prop_assert_eq!(journey.leg_count(), train_count);
+            }
+        }
+
+        /// Property: consecutive segments connect (destination == next origin).
+        #[test]
+        fn segments_are_connected(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                for window in journey.segments().windows(2) {
+                    prop_assert_eq!(
+                        window[0].destination(),
+                        window[1].origin(),
+                        "Segment ending at {:?} should connect to segment starting at {:?}",
+                        window[0].destination(),
+                        window[1].origin()
+                    );
+                }
+            }
+        }
+
+        /// Property: is_direct iff leg_count == 1.
+        #[test]
+        fn is_direct_iff_single_leg(params in connected_legs_params(4)) {
+            if let Some(journey) = build_journey_from_params(&params) {
+                prop_assert_eq!(
+                    journey.is_direct(),
+                    journey.leg_count() == 1,
+                    "is_direct() = {} but leg_count = {}",
+                    journey.is_direct(),
+                    journey.leg_count()
+                );
+            }
+        }
+    }
+
+    // Test with instrumentation to verify property test coverage
+    #[test]
+    fn journey_properties_distribution() {
+        use proptest::test_runner::{Config, TestRunner};
+        use std::cell::Cell;
+
+        let mut runner = TestRunner::new(Config::with_cases(200));
+        let single_leg = Cell::new(0u32);
+        let multi_leg = Cell::new(0u32);
+        let total = Cell::new(0u32);
+
+        let _ = runner.run(&connected_legs_params(4), |params| {
+            if let Some(journey) = build_journey_from_params(&params) {
+                total.set(total.get() + 1);
+                if journey.leg_count() == 1 {
+                    single_leg.set(single_leg.get() + 1);
+                } else {
+                    multi_leg.set(multi_leg.get() + 1);
+                }
+            }
+            Ok(())
+        });
+
+        // Verify we're testing both single and multi-leg journeys
+        assert!(
+            single_leg.get() > 0,
+            "Should test some single-leg journeys"
+        );
+        assert!(
+            multi_leg.get() > 0,
+            "Should test some multi-leg journeys"
+        );
+        println!(
+            "Journey distribution: {} single-leg, {} multi-leg out of {} valid",
+            single_leg.get(),
+            multi_leg.get(),
+            total.get()
+        );
+    }
+}

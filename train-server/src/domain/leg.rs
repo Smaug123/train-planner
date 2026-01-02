@@ -464,3 +464,282 @@ mod tests {
         assert_eq!(leg.arrival_time(), time("10:30"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::ServiceRef;
+    use chrono::{NaiveDate, NaiveTime};
+    use proptest::prelude::*;
+    use std::cell::Cell;
+
+    fn fixed_date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+    }
+
+    fn make_time(hour: u32, min: u32) -> RailTime {
+        let time = NaiveTime::from_hms_opt(hour % 24, min % 60, 0).unwrap();
+        RailTime::new(fixed_date(), time)
+    }
+
+    fn crs_from_idx(i: usize) -> Crs {
+        let c1 = b'A' + ((i / 676) % 26) as u8;
+        let c2 = b'A' + ((i / 26) % 26) as u8;
+        let c3 = b'A' + (i % 26) as u8;
+        let s = format!("{}{}{}", c1 as char, c2 as char, c3 as char);
+        Crs::parse(&s).unwrap()
+    }
+
+    /// Generate a service with n stops, each 15 minutes apart.
+    fn make_service_with_stops(n: usize, start_mins: u16) -> Arc<Service> {
+        let mut calls = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let crs = crs_from_idx(i);
+            let mut call = Call::new(crs, format!("Station {}", i));
+
+            let time_mins = start_mins + (i as u16) * 15;
+            let hour = (time_mins / 60) as u32 % 24;
+            let min = (time_mins % 60) as u32;
+
+            if i > 0 {
+                call.booked_arrival = Some(make_time(hour, min));
+            }
+            if i < n - 1 {
+                // Departure is 2 minutes after arrival (except first which is just departure)
+                let dep_mins = if i == 0 { time_mins } else { time_mins + 2 };
+                let dep_hour = (dep_mins / 60) as u32 % 24;
+                let dep_min = (dep_mins % 60) as u32;
+                call.booked_departure = Some(make_time(dep_hour, dep_min));
+            }
+
+            calls.push(call);
+        }
+
+        Arc::new(Service {
+            service_ref: ServiceRef::new("TEST".into(), crs_from_idx(0)),
+            headcode: None,
+            operator: "Test".into(),
+            operator_code: None,
+            calls,
+            board_station_idx: CallIndex(0),
+        })
+    }
+
+    proptest! {
+        /// Property: Leg::new with board >= alight always fails.
+        #[test]
+        fn invalid_indices_fail(
+            num_stops in 2usize..10,
+            board in 0usize..10,
+            alight in 0usize..10,
+            start_mins in 0u16..1200,
+        ) {
+            let service = make_service_with_stops(num_stops, start_mins);
+
+            if board >= alight {
+                let result = Leg::new(service, CallIndex(board), CallIndex(alight));
+                prop_assert!(
+                    result.is_err(),
+                    "Leg::new should fail when board {} >= alight {}",
+                    board,
+                    alight
+                );
+            }
+        }
+
+        /// Property: Leg::new with valid indices board < alight < len succeeds.
+        #[test]
+        fn valid_indices_succeed(
+            num_stops in 2usize..10,
+            start_mins in 0u16..1200,
+        ) {
+            let service = make_service_with_stops(num_stops, start_mins);
+
+            // Test all valid (board, alight) pairs
+            for board in 0..num_stops {
+                for alight in (board + 1)..num_stops {
+                    let result = Leg::new(service.clone(), CallIndex(board), CallIndex(alight));
+                    prop_assert!(
+                        result.is_ok(),
+                        "Leg::new should succeed for board={}, alight={} with {} stops",
+                        board, alight, num_stops
+                    );
+                }
+            }
+        }
+
+        /// Property: calls().len() == alight - board + 1.
+        #[test]
+        fn calls_len_equals_range(
+            num_stops in 3usize..10,
+            board in 0usize..5,
+            alight_offset in 1usize..5,
+            start_mins in 0u16..1200,
+        ) {
+            let alight = board + alight_offset;
+            if alight < num_stops {
+                let service = make_service_with_stops(num_stops, start_mins);
+                let leg = Leg::new(service, CallIndex(board), CallIndex(alight)).unwrap();
+
+                prop_assert_eq!(
+                    leg.calls().len(),
+                    alight - board + 1,
+                    "calls().len() should be alight - board + 1"
+                );
+            }
+        }
+
+        /// Property: board_call() is the same as calls()[0].
+        #[test]
+        fn board_call_is_first(
+            num_stops in 3usize..10,
+            board in 0usize..5,
+            alight_offset in 1usize..5,
+            start_mins in 0u16..1200,
+        ) {
+            let alight = board + alight_offset;
+            if alight < num_stops {
+                let service = make_service_with_stops(num_stops, start_mins);
+                let leg = Leg::new(service, CallIndex(board), CallIndex(alight)).unwrap();
+
+                let calls = leg.calls();
+                prop_assert_eq!(
+                    leg.board_call().station,
+                    calls[0].station,
+                    "board_call should be calls()[0]"
+                );
+            }
+        }
+
+        /// Property: alight_call() is the same as calls().last().
+        #[test]
+        fn alight_call_is_last(
+            num_stops in 3usize..10,
+            board in 0usize..5,
+            alight_offset in 1usize..5,
+            start_mins in 0u16..1200,
+        ) {
+            let alight = board + alight_offset;
+            if alight < num_stops {
+                let service = make_service_with_stops(num_stops, start_mins);
+                let leg = Leg::new(service, CallIndex(board), CallIndex(alight)).unwrap();
+
+                let calls = leg.calls();
+                prop_assert_eq!(
+                    leg.alight_call().station,
+                    calls.last().unwrap().station,
+                    "alight_call should be calls().last()"
+                );
+            }
+        }
+
+        /// Property: intermediate_stop_count() == calls().len() - 2.
+        #[test]
+        fn intermediate_count_correct(
+            num_stops in 3usize..10,
+            board in 0usize..5,
+            alight_offset in 1usize..5,
+            start_mins in 0u16..1200,
+        ) {
+            let alight = board + alight_offset;
+            if alight < num_stops {
+                let service = make_service_with_stops(num_stops, start_mins);
+                let leg = Leg::new(service, CallIndex(board), CallIndex(alight)).unwrap();
+
+                let expected = leg.calls().len().saturating_sub(2);
+                prop_assert_eq!(
+                    leg.intermediate_stop_count(),
+                    expected,
+                    "intermediate_stop_count should be calls().len() - 2"
+                );
+            }
+        }
+
+        /// Property: board_station() == service.calls[board].station.
+        #[test]
+        fn board_station_matches_service(
+            num_stops in 3usize..10,
+            board in 0usize..5,
+            alight_offset in 1usize..5,
+            start_mins in 0u16..1200,
+        ) {
+            let alight = board + alight_offset;
+            if alight < num_stops {
+                let service = make_service_with_stops(num_stops, start_mins);
+                let expected_station = service.calls[board].station;
+                let leg = Leg::new(service, CallIndex(board), CallIndex(alight)).unwrap();
+
+                prop_assert_eq!(
+                    *leg.board_station(),
+                    expected_station,
+                    "board_station should match service.calls[board].station"
+                );
+            }
+        }
+
+        /// Property: alight_station() == service.calls[alight].station.
+        #[test]
+        fn alight_station_matches_service(
+            num_stops in 3usize..10,
+            board in 0usize..5,
+            alight_offset in 1usize..5,
+            start_mins in 0u16..1200,
+        ) {
+            let alight = board + alight_offset;
+            if alight < num_stops {
+                let service = make_service_with_stops(num_stops, start_mins);
+                let expected_station = service.calls[alight].station;
+                let leg = Leg::new(service, CallIndex(board), CallIndex(alight)).unwrap();
+
+                prop_assert_eq!(
+                    *leg.alight_station(),
+                    expected_station,
+                    "alight_station should match service.calls[alight].station"
+                );
+            }
+        }
+    }
+
+    /// Test distribution to ensure we're exercising edge cases.
+    #[test]
+    fn leg_property_distribution() {
+        use proptest::test_runner::{Config, TestRunner};
+
+        let mut runner = TestRunner::new(Config::with_cases(200));
+        let direct_legs = Cell::new(0u32);
+        let multi_stop_legs = Cell::new(0u32);
+
+        let _ = runner.run(
+            &(3usize..10, 0usize..5, 1usize..5, 0u16..1200),
+            |(num_stops, board, alight_offset, start_mins)| {
+                let alight = board + alight_offset;
+                if alight < num_stops {
+                    let service = make_service_with_stops(num_stops, start_mins);
+                    if let Ok(leg) = Leg::new(service, CallIndex(board), CallIndex(alight)) {
+                        if leg.intermediate_stop_count() == 0 {
+                            direct_legs.set(direct_legs.get() + 1);
+                        } else {
+                            multi_stop_legs.set(multi_stop_legs.get() + 1);
+                        }
+                    }
+                }
+                Ok(())
+            },
+        );
+
+        assert!(
+            direct_legs.get() > 0,
+            "Should test some direct legs (no intermediate stops)"
+        );
+        assert!(
+            multi_stop_legs.get() > 0,
+            "Should test some legs with intermediate stops"
+        );
+        println!(
+            "Leg distribution: {} direct, {} multi-stop",
+            direct_legs.get(),
+            multi_stop_legs.get()
+        );
+    }
+}

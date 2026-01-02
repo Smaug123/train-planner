@@ -1027,3 +1027,46 @@ mod proptests {
         }
     }
 }
+
+/// Tests that demonstrate bugs in the current implementation.
+/// These tests are expected to FAIL until the bugs are fixed.
+#[cfg(test)]
+mod bug_tests {
+    use super::*;
+
+    /// BUG: RailTime::add panics on extreme durations instead of returning an error.
+    ///
+    /// The Add implementation uses expect() which panics on overflow.
+    /// This should either return a Result or use saturating arithmetic.
+    #[test]
+    #[should_panic(expected = "time overflow")]
+    fn bug_add_panics_on_overflow() {
+        let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let time = RailTime::parse_hhmm("12:00", date).unwrap();
+
+        // Adding a massive duration should not panic - it should return an error
+        // or saturate. Currently it panics.
+        let _result = time + Duration::days(i64::MAX / (24 * 60 * 60 * 1000));
+    }
+
+    /// BUG: There's no way to safely add a duration and handle overflow.
+    ///
+    /// While checked_add exists, the Add trait implementation panics.
+    /// Users might reasonably expect + to behave like checked_add or saturate.
+    ///
+    /// This test documents that even moderate durations near date limits can fail.
+    #[test]
+    fn bug_add_near_date_limits() {
+        // Use a date near the maximum representable
+        let date = NaiveDate::from_ymd_opt(262142, 12, 31).unwrap();
+        let time = RailTime::parse_hhmm("23:00", date).unwrap();
+
+        // checked_add should return None for overflow
+        let result = time.checked_add(Duration::days(365));
+        assert!(
+            result.is_none(),
+            "Expected None for date overflow, got {:?}",
+            result
+        );
+    }
+}

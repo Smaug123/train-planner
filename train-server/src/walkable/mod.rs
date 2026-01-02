@@ -243,3 +243,107 @@ mod tests {
         assert!(lookup(&crs("PAD"), &crs("EUS")).is_none());
     }
 }
+
+/// Tests that demonstrate bugs in the current implementation.
+/// These tests are expected to FAIL until the bugs are fixed.
+#[cfg(test)]
+mod bug_tests {
+    use super::*;
+
+    fn crs(s: &str) -> Crs {
+        Crs::parse(s).unwrap()
+    }
+
+    /// BUG: len() is incorrect when self-connections exist.
+    ///
+    /// The len() method divides by 2 assuming all connections are stored
+    /// twice (A→B and B→A). But self-connections (A→A) are only stored once,
+    /// making the count wrong.
+    ///
+    /// london_connections() includes PAD→PAD as a self-connection.
+    #[test]
+    fn bug_len_with_self_connection() {
+        let mut wc = WalkableConnections::new();
+
+        // Add a normal connection (stored twice: A→B and B→A)
+        wc.add(crs("EUS"), crs("KGX"), 5);
+
+        // Add a self-connection (stored once: PAD→PAD)
+        wc.add(crs("PAD"), crs("PAD"), 0);
+
+        // Internal map has 3 entries: EUS→KGX, KGX→EUS, PAD→PAD
+        // len() returns connections.len() / 2 = 3 / 2 = 1
+        // But we added 2 logical connections!
+        assert_eq!(
+            wc.len(),
+            2,
+            "Expected 2 connections (EUS↔KGX and PAD↔PAD), but len() returns wrong value"
+        );
+    }
+
+    /// BUG: london_connections() has this bug.
+    ///
+    /// It includes .add("PAD", "PAD", 0) which is a self-connection,
+    /// causing len() to undercount.
+    #[test]
+    fn bug_london_connections_len() {
+        let wc = london_connections();
+
+        // Count the actual connections defined in london_connections():
+        // EUS↔KGX, KGX↔STP, EUS↔STP, PAD↔PAD (self), VIC↔VXH, WAT↔WLO,
+        // CHX↔LST, CST↔MOG, LST↔MOG, FST↔CST, FST↔LST, LBG↔WAT, LBG↔CST
+        // = 13 pairs
+        //
+        // Internal storage: 12 pairs × 2 + 1 self = 25 entries
+        // len() = 25 / 2 = 12 (wrong, should be 13)
+
+        // We can verify by counting walkable_from for all stations
+        let stations = ["EUS", "KGX", "STP", "PAD", "VIC", "VXH", "WAT", "WLO",
+                        "CHX", "LST", "CST", "MOG", "FST", "LBG"];
+        let mut total_edges = 0;
+        for s in &stations {
+            if let Ok(c) = Crs::parse(s) {
+                total_edges += wc.walkable_from(&c).len();
+            }
+        }
+        // Each connection is counted twice (once from each end), except self-connections
+        // So: (total_edges + self_connections) / 2 = actual connections
+        // With PAD→PAD: (total_edges + 1) / 2 should equal wc.len()
+        // But len() uses raw division, so this will be off
+
+        // The actual number of defined pairs is 13
+        // If len() is correct, this should pass:
+        assert_eq!(
+            wc.len(),
+            13,
+            "london_connections() defines 13 pairs but len() returns wrong count"
+        );
+    }
+
+    /// BUG: Adding the same connection twice overwrites silently.
+    ///
+    /// There's no error or deduplication tracking when adding a connection
+    /// that already exists with a different duration.
+    #[test]
+    fn bug_duplicate_connection_overwrites() {
+        let mut wc = WalkableConnections::new();
+
+        wc.add(crs("EUS"), crs("KGX"), 5);
+        wc.add(crs("EUS"), crs("KGX"), 10); // Different duration!
+
+        // Should this be an error? Or should we keep the first/shorter?
+        // Currently it silently overwrites.
+
+        // At minimum, len() should still be correct:
+        assert_eq!(wc.len(), 1, "Duplicate add should not increase len");
+
+        // But which duration do we have? The second one overwrote the first.
+        // If we wanted "keep shorter", this would fail:
+        let duration = wc.get(&crs("EUS"), &crs("KGX")).unwrap();
+        assert_eq!(
+            duration,
+            Duration::minutes(5),
+            "Expected to keep the original/shorter duration, but got overwritten"
+        );
+    }
+}

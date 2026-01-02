@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 952b021e341f82a9f4b11c75417633b118f31fb51ca06affaedc8be6b5b539c3 # shrinks to booked_mins = 1393, delay_mins = 47, station_idx = 0

@@ -600,6 +600,66 @@ mod proptests {
         );
     }
 
+    proptest! {
+        /// Property: remove_dominated never returns empty if input is non-empty.
+        ///
+        /// If we have at least one journey, at least one must be non-dominated
+        /// (the Pareto front is never empty for non-empty input).
+        #[test]
+        fn remove_dominated_nonempty_guarantee(journeys in prop::collection::vec(journey_strategy(), 1..10)) {
+            let result = remove_dominated(journeys);
+
+            prop_assert!(
+                !result.is_empty(),
+                "remove_dominated returned empty for non-empty input"
+            );
+        }
+
+        /// Property: single journey is never dominated (trivially Pareto-optimal).
+        #[test]
+        fn single_journey_preserved(journey in journey_strategy()) {
+            let result = remove_dominated(vec![journey.clone()]);
+
+            prop_assert_eq!(
+                result.len(),
+                1,
+                "Single journey should be preserved"
+            );
+        }
+
+        /// Property: two identical journeys should deduplicate to one (if truly equal).
+        /// Actually, remove_dominated checks strict domination, so identical journeys
+        /// don't dominate each other. This tests that.
+        #[test]
+        fn identical_journeys_both_kept(
+            id in 0u32..100,
+            dep_mins in 0u16..1380,
+            duration in 10u16..120,
+        ) {
+            // Create two journeys with identical times
+            let j1 = {
+                let svc = make_service_with_times(id, dep_mins, duration);
+                let leg = Leg::new(svc, CallIndex(0), CallIndex(1)).unwrap();
+                Journey::new(vec![Segment::Train(leg)]).unwrap()
+            };
+            let j2 = {
+                let svc = make_service_with_times(id + 1000, dep_mins, duration); // different service ID
+                let leg = Leg::new(svc, CallIndex(0), CallIndex(1)).unwrap();
+                Journey::new(vec![Segment::Train(leg)]).unwrap()
+            };
+
+            let result = remove_dominated(vec![j1, j2]);
+
+            // Neither dominates the other (they're equal on all metrics)
+            // so both should be kept
+            prop_assert_eq!(
+                result.len(),
+                2,
+                "Identical journeys should both be kept by remove_dominated"
+            );
+        }
+    }
+
     // ========== deduplicate properties ==========
 
     proptest! {
