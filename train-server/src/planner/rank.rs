@@ -338,3 +338,348 @@ mod tests {
         assert!(deduplicate(vec![]).is_empty());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::{Call, CallIndex, Crs, Leg, RailTime, Segment, Service, ServiceRef};
+    use chrono::{NaiveDate, NaiveTime};
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    fn date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+    }
+
+    fn make_time(hour: u32, min: u32) -> RailTime {
+        let time = NaiveTime::from_hms_opt(hour % 24, min % 60, 0).unwrap();
+        RailTime::new(date(), time)
+    }
+
+    /// Generate a valid service with parameterized times.
+    /// dep_mins: departure time in minutes from midnight
+    /// duration_mins: journey duration
+    fn make_service_with_times(id: u32, dep_mins: u16, duration_mins: u16) -> Arc<Service> {
+        let dep_hour = (dep_mins / 60) as u32 % 24;
+        let dep_min = (dep_mins % 60) as u32;
+        let arr_mins = dep_mins + duration_mins;
+        let arr_hour = (arr_mins / 60) as u32 % 24;
+        let arr_min = (arr_mins % 60) as u32;
+
+        let dep_time = make_time(dep_hour, dep_min);
+        let arr_time = make_time(arr_hour, arr_min);
+
+        let origin_crs = Crs::parse("PAD").unwrap();
+        let dest_crs = Crs::parse("RDG").unwrap();
+
+        let mut origin_call = Call::new(origin_crs, "Paddington".to_string());
+        origin_call.booked_departure = Some(dep_time);
+
+        let mut dest_call = Call::new(dest_crs, "Reading".to_string());
+        dest_call.booked_arrival = Some(arr_time);
+
+        Arc::new(Service {
+            service_ref: ServiceRef::new(format!("SVC{id}"), origin_crs),
+            headcode: None,
+            operator: "Test".to_string(),
+            operator_code: None,
+            calls: vec![origin_call, dest_call],
+            board_station_idx: CallIndex(0),
+        })
+    }
+
+    /// Generate a two-leg journey with a change.
+    /// Creates PAD -> RDG (change) RDG -> BRI
+    fn make_two_leg_journey(
+        id: u32,
+        dep_mins: u16,
+        leg1_duration: u16,
+        connection_wait: u16,
+        leg2_duration: u16,
+    ) -> Journey {
+        let dep_hour = (dep_mins / 60) as u32 % 24;
+        let dep_min = (dep_mins % 60) as u32;
+
+        let leg1_arr_mins = dep_mins + leg1_duration;
+        let leg1_arr_hour = (leg1_arr_mins / 60) as u32 % 24;
+        let leg1_arr_min = (leg1_arr_mins % 60) as u32;
+
+        let leg2_dep_mins = leg1_arr_mins + connection_wait;
+        let leg2_dep_hour = (leg2_dep_mins / 60) as u32 % 24;
+        let leg2_dep_min = (leg2_dep_mins % 60) as u32;
+
+        let leg2_arr_mins = leg2_dep_mins + leg2_duration;
+        let leg2_arr_hour = (leg2_arr_mins / 60) as u32 % 24;
+        let leg2_arr_min = (leg2_arr_mins % 60) as u32;
+
+        let pad = Crs::parse("PAD").unwrap();
+        let rdg = Crs::parse("RDG").unwrap();
+        let bri = Crs::parse("BRI").unwrap();
+
+        // First service: PAD -> RDG
+        let mut s1_origin = Call::new(pad, "Paddington".to_string());
+        s1_origin.booked_departure = Some(make_time(dep_hour, dep_min));
+
+        let mut s1_dest = Call::new(rdg, "Reading".to_string());
+        s1_dest.booked_arrival = Some(make_time(leg1_arr_hour, leg1_arr_min));
+
+        let svc1 = Arc::new(Service {
+            service_ref: ServiceRef::new(format!("SVC{id}A"), pad),
+            headcode: None,
+            operator: "Test".to_string(),
+            operator_code: None,
+            calls: vec![s1_origin, s1_dest],
+            board_station_idx: CallIndex(0),
+        });
+
+        // Second service: RDG -> BRI
+        let mut s2_origin = Call::new(rdg, "Reading".to_string());
+        s2_origin.booked_departure = Some(make_time(leg2_dep_hour, leg2_dep_min));
+
+        let mut s2_dest = Call::new(bri, "Bristol".to_string());
+        s2_dest.booked_arrival = Some(make_time(leg2_arr_hour, leg2_arr_min));
+
+        let svc2 = Arc::new(Service {
+            service_ref: ServiceRef::new(format!("SVC{id}B"), rdg),
+            headcode: None,
+            operator: "Test".to_string(),
+            operator_code: None,
+            calls: vec![s2_origin, s2_dest],
+            board_station_idx: CallIndex(0),
+        });
+
+        let leg1 = Leg::new(svc1, CallIndex(0), CallIndex(1)).unwrap();
+        let leg2 = Leg::new(svc2, CallIndex(0), CallIndex(1)).unwrap();
+
+        Journey::new(vec![Segment::Train(leg1), Segment::Train(leg2)]).unwrap()
+    }
+
+    /// Strategy for generating a single-leg journey
+    fn journey_strategy() -> impl Strategy<Value = Journey> {
+        (
+            0u32..1000, // id
+            0u16..1380, // dep_mins (0:00 - 23:00)
+            10u16..120, // duration (10 mins - 2 hours)
+        )
+            .prop_map(|(id, dep_mins, duration)| {
+                let svc = make_service_with_times(id, dep_mins, duration);
+                let leg = Leg::new(svc, CallIndex(0), CallIndex(1)).unwrap();
+                Journey::new(vec![Segment::Train(leg)]).unwrap()
+            })
+    }
+
+    /// Strategy for generating journeys with varied change counts.
+    /// Bias parameter controls probability of multi-leg journey.
+    fn journey_with_changes_strategy(change_bias: f64) -> impl Strategy<Value = Journey> {
+        prop::bool::weighted(change_bias).prop_flat_map(|has_change| {
+            if has_change {
+                (
+                    0u32..1000,
+                    0u16..1200, // dep_mins
+                    15u16..60,  // leg1_duration
+                    5u16..30,   // connection_wait
+                    15u16..60,  // leg2_duration
+                )
+                    .prop_map(|(id, dep, d1, wait, d2)| make_two_leg_journey(id, dep, d1, wait, d2))
+                    .boxed()
+            } else {
+                journey_strategy().boxed()
+            }
+        })
+    }
+
+    /// Strategy for generating a list of journeys, fuzzing over distribution bias
+    fn journeys_strategy() -> impl Strategy<Value = Vec<Journey>> {
+        // Fuzz over the change bias itself
+        (0.0f64..1.0).prop_flat_map(|change_bias| {
+            prop::collection::vec(journey_with_changes_strategy(change_bias), 0..15)
+        })
+    }
+
+    // ========== rank_journeys properties ==========
+
+    proptest! {
+        #[test]
+        fn rank_journeys_is_sorted(journeys in journeys_strategy()) {
+            let ranked = rank_journeys(journeys);
+
+            // Reference: check sorted by (arrival, changes, duration)
+            for window in ranked.windows(2) {
+                let a = &window[0];
+                let b = &window[1];
+
+                let a_key = (a.arrival_time(), a.change_count(), a.total_duration());
+                let b_key = (b.arrival_time(), b.change_count(), b.total_duration());
+
+                prop_assert!(
+                    a_key <= b_key,
+                    "Not sorted: {:?} should come before {:?}",
+                    a_key,
+                    b_key
+                );
+            }
+        }
+
+        #[test]
+        fn rank_journeys_preserves_elements(journeys in journeys_strategy()) {
+            let original_len = journeys.len();
+            let ranked = rank_journeys(journeys);
+
+            prop_assert_eq!(ranked.len(), original_len);
+        }
+    }
+
+    // ========== remove_dominated properties ==========
+
+    /// Check if journey `a` dominates journey `b`
+    fn dominates(a: &Journey, b: &Journey) -> bool {
+        a.arrival_time() <= b.arrival_time()
+            && a.change_count() <= b.change_count()
+            && a.total_duration() <= b.total_duration()
+            && (a.arrival_time() < b.arrival_time()
+                || a.change_count() < b.change_count()
+                || a.total_duration() < b.total_duration())
+    }
+
+    proptest! {
+        #[test]
+        fn remove_dominated_no_internal_domination(journeys in journeys_strategy()) {
+            let result = remove_dominated(journeys);
+
+            // No journey in result should dominate another
+            for (i, a) in result.iter().enumerate() {
+                for (j, b) in result.iter().enumerate() {
+                    if i != j {
+                        prop_assert!(
+                            !dominates(a, b),
+                            "Journey {} dominates journey {} in result",
+                            i,
+                            j
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn remove_dominated_subset(journeys in journeys_strategy()) {
+            let original_len = journeys.len();
+            let result = remove_dominated(journeys);
+
+            prop_assert!(result.len() <= original_len);
+        }
+    }
+
+    // Test with instrumentation to verify we hit dominated cases
+    #[test]
+    fn remove_dominated_distribution() {
+        use proptest::test_runner::{Config, TestRunner};
+        use std::cell::Cell;
+
+        let mut runner = TestRunner::new(Config::with_cases(500));
+        let dominated_removed_count = Cell::new(0u32);
+        let total_tests = Cell::new(0u32);
+
+        let _ = runner.run(&journeys_strategy(), |journeys| {
+            let original_len = journeys.len();
+            let result = remove_dominated(journeys);
+
+            if result.len() < original_len {
+                dominated_removed_count.set(dominated_removed_count.get() + 1);
+            }
+            total_tests.set(total_tests.get() + 1);
+            Ok(())
+        });
+
+        // We should see some dominated journeys removed
+        // (not all inputs will have dominated journeys, but some should)
+        assert!(
+            dominated_removed_count.get() > 0 || total_tests.get() < 10,
+            "Never removed dominated journeys in {} tests",
+            total_tests.get()
+        );
+    }
+
+    // ========== deduplicate properties ==========
+
+    proptest! {
+        #[test]
+        fn deduplicate_no_duplicate_keys(journeys in journeys_strategy()) {
+            let result = deduplicate(journeys);
+
+            // No two journeys should have same (arrival, departure, changes)
+            for (i, a) in result.iter().enumerate() {
+                for (j, b) in result.iter().enumerate() {
+                    if i != j {
+                        let a_key = (a.arrival_time(), a.departure_time(), a.change_count());
+                        let b_key = (b.arrival_time(), b.departure_time(), b.change_count());
+                        prop_assert!(
+                            a_key != b_key,
+                            "Duplicate key at {} and {}: {:?}",
+                            i,
+                            j,
+                            a_key
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn deduplicate_subset(journeys in journeys_strategy()) {
+            let original_len = journeys.len();
+            let result = deduplicate(journeys);
+
+            prop_assert!(result.len() <= original_len);
+        }
+    }
+
+    // Test with instrumentation to verify we hit duplicate cases
+    #[test]
+    fn deduplicate_distribution() {
+        use proptest::test_runner::{Config, TestRunner};
+        use std::cell::Cell;
+
+        let mut runner = TestRunner::new(Config::with_cases(500));
+        let duplicates_removed_count = Cell::new(0u32);
+        let total_tests = Cell::new(0u32);
+
+        // Use a strategy that's more likely to generate duplicates
+        let dup_strategy = prop::collection::vec(
+            (
+                0u32..5, // fewer IDs = more likely duplicates
+                0u16..4, // dep slot (each * 60 = hour)
+                0u16..2, // duration slot (each * 30 = duration)
+            ),
+            2..10,
+        )
+        .prop_map(|params| {
+            params
+                .into_iter()
+                .map(|(id, dep_slot, dur_slot)| {
+                    let svc = make_service_with_times(id, dep_slot * 60, dur_slot * 30 + 30);
+                    let leg = Leg::new(svc, CallIndex(0), CallIndex(1)).unwrap();
+                    Journey::new(vec![Segment::Train(leg)]).unwrap()
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let _ = runner.run(&dup_strategy, |journeys| {
+            let original_len = journeys.len();
+            let result = deduplicate(journeys);
+
+            if result.len() < original_len {
+                duplicates_removed_count.set(duplicates_removed_count.get() + 1);
+            }
+            total_tests.set(total_tests.get() + 1);
+            Ok(())
+        });
+
+        // We should see some duplicates removed
+        assert!(
+            duplicates_removed_count.get() > 0,
+            "Never removed duplicates in {} tests (strategy may need tuning)",
+            total_tests.get()
+        );
+    }
+}

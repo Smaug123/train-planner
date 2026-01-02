@@ -795,3 +795,462 @@ mod tests {
         assert!(result.journeys.is_empty());
     }
 }
+
+/// Property-based tests comparing BFS planner to reference implementation.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::domain::{Call, ServiceRef};
+    use crate::planner::rank::remove_dominated;
+    use chrono::{NaiveDate, NaiveTime};
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    /// Mock service provider for testing
+    struct MockProvider {
+        services: Vec<Arc<Service>>,
+    }
+
+    impl ServiceProvider for MockProvider {
+        fn get_departures(
+            &self,
+            station: &Crs,
+            after: RailTime,
+        ) -> Result<Vec<Arc<Service>>, SearchError> {
+            Ok(self
+                .services
+                .iter()
+                .filter(|s| {
+                    s.calls.iter().any(|c| {
+                        &c.station == station && c.expected_departure().is_some_and(|t| t >= after)
+                    })
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+    }
+
+    fn make_time(hour: u32, min: u32) -> RailTime {
+        let time = NaiveTime::from_hms_opt(hour % 24, min % 60, 0).unwrap();
+        RailTime::new(date(), time)
+    }
+
+    // Station codes for our test network
+    const STATIONS: [&str; 6] = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"];
+
+    fn station_crs(idx: usize) -> Crs {
+        Crs::parse(STATIONS[idx % STATIONS.len()]).unwrap()
+    }
+
+    /// Generate a service connecting two stations
+    fn make_test_service(
+        id: u32,
+        from_idx: usize,
+        to_idx: usize,
+        dep_mins: u16,
+        duration_mins: u16,
+    ) -> Arc<Service> {
+        let from = station_crs(from_idx);
+        let to = station_crs(to_idx);
+
+        let dep_hour = (dep_mins / 60) as u32 % 24;
+        let dep_min = (dep_mins % 60) as u32;
+        let arr_mins = dep_mins + duration_mins;
+        let arr_hour = (arr_mins / 60) as u32 % 24;
+        let arr_min = (arr_mins % 60) as u32;
+
+        let mut origin = Call::new(from, format!("Station {}", from_idx));
+        origin.booked_departure = Some(make_time(dep_hour, dep_min));
+
+        let mut dest = Call::new(to, format!("Station {}", to_idx));
+        dest.booked_arrival = Some(make_time(arr_hour, arr_min));
+
+        Arc::new(Service {
+            service_ref: ServiceRef::new(format!("SVC{id}"), from),
+            headcode: None,
+            operator: "Test".to_string(),
+            operator_code: None,
+            calls: vec![origin, dest],
+            board_station_idx: CallIndex(0),
+        })
+    }
+
+    /// Generate a service network: list of services connecting stations
+    fn network_strategy() -> impl Strategy<Value = Vec<Arc<Service>>> {
+        // Generate 3-10 services
+        prop::collection::vec(
+            (
+                0u32..100,  // id
+                0usize..6,  // from station
+                0usize..6,  // to station (different from from)
+                0u16..1200, // dep_mins
+                15u16..60,  // duration
+            ),
+            3..10,
+        )
+        .prop_map(|params| {
+            params
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, (id, from, to, dep, dur))| {
+                    // Skip self-loops
+                    if from == to {
+                        return None;
+                    }
+                    Some(make_test_service(id + i as u32 * 100, from, to, dep, dur))
+                })
+                .collect()
+        })
+    }
+
+    /// Reference implementation: exhaustive DFS search
+    /// Returns all valid journeys from current service/position to destination
+    fn reference_search(
+        current_service: &Arc<Service>,
+        current_position: CallIndex,
+        destination: &Crs,
+        services: &[Arc<Service>],
+        walkable: &WalkableConnections,
+        config: &SearchConfig,
+    ) -> Vec<Journey> {
+        let mut results = Vec::new();
+        let mut used = HashSet::new();
+        used.insert(current_service.service_ref.darwin_id.clone());
+
+        // Try direct route first
+        if let Some((dest_idx, _)) = current_service.find_call(destination, current_position.next())
+        {
+            if let Ok(leg) = Leg::new(current_service.clone(), current_position, dest_idx) {
+                if let Ok(journey) = Journey::new(vec![Segment::Train(leg)]) {
+                    results.push(journey);
+                }
+            }
+        }
+
+        // DFS from each intermediate alighting point
+        for alight_idx in (current_position.0 + 1)..current_service.calls.len() {
+            let alight_call = &current_service.calls[alight_idx];
+            let alight_time = match alight_call.expected_arrival() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            if let Ok(first_leg) = Leg::new(
+                current_service.clone(),
+                current_position,
+                CallIndex(alight_idx),
+            ) {
+                let first_segment = Segment::Train(first_leg);
+
+                // If this is the destination, we're done
+                if &alight_call.station == destination {
+                    if let Ok(journey) = Journey::new(vec![first_segment.clone()]) {
+                        results.push(journey);
+                    }
+                    continue;
+                }
+
+                // Otherwise, recurse
+                reference_dfs(
+                    &alight_call.station,
+                    alight_time,
+                    destination,
+                    vec![first_segment],
+                    0,
+                    &used,
+                    services,
+                    walkable,
+                    config,
+                    &mut results,
+                );
+            }
+        }
+
+        results
+    }
+
+    /// DFS helper for reference search
+    #[allow(clippy::too_many_arguments)]
+    fn reference_dfs(
+        station: &Crs,
+        time: RailTime,
+        destination: &Crs,
+        segments: Vec<Segment>,
+        changes: usize,
+        used: &HashSet<String>,
+        services: &[Arc<Service>],
+        walkable: &WalkableConnections,
+        config: &SearchConfig,
+        results: &mut Vec<Journey>,
+    ) {
+        // Pruning
+        if changes >= config.max_changes {
+            return;
+        }
+
+        // Check journey time
+        let first_dep = segments.first().map(|s| match s {
+            Segment::Train(leg) => leg.departure_time(),
+            Segment::Walk(_) => time,
+        });
+        if let Some(dep) = first_dep {
+            if time.signed_duration_since(dep) > config.max_journey() {
+                return;
+            }
+        }
+
+        // Limit recursion depth to avoid infinite loops
+        if segments.len() > 10 {
+            return;
+        }
+
+        let min_connection = time + config.min_connection();
+
+        // Try each service
+        for service in services {
+            if used.contains(&service.service_ref.darwin_id) {
+                continue;
+            }
+
+            // Find if this service stops at our station
+            let board_idx = service.calls.iter().position(|c| {
+                &c.station == station
+                    && c.expected_departure()
+                        .is_some_and(|dep| dep >= min_connection)
+            });
+
+            let board_idx = match board_idx {
+                Some(i) => CallIndex(i),
+                None => continue,
+            };
+
+            // Try alighting at each subsequent stop
+            for alight_idx in (board_idx.0 + 1)..service.calls.len() {
+                let alight_call = &service.calls[alight_idx];
+                let alight_time = match alight_call.expected_arrival() {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                if let Ok(leg) = Leg::new(service.clone(), board_idx, CallIndex(alight_idx)) {
+                    let mut new_segments = segments.clone();
+                    new_segments.push(Segment::Train(leg));
+
+                    // Check if we reached destination
+                    if &alight_call.station == destination {
+                        if let Ok(journey) = Journey::new(new_segments) {
+                            results.push(journey);
+                        }
+                    } else {
+                        // Recurse
+                        let mut new_used = used.clone();
+                        new_used.insert(service.service_ref.darwin_id.clone());
+
+                        reference_dfs(
+                            &alight_call.station,
+                            alight_time,
+                            destination,
+                            new_segments,
+                            changes + 1,
+                            &new_used,
+                            services,
+                            walkable,
+                            config,
+                            results,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Try walking
+        for (walk_to, walk_duration) in walkable.walkable_from(station) {
+            if walk_duration > config.max_walk() {
+                continue;
+            }
+
+            let walk = Walk {
+                from: *station,
+                to: walk_to,
+                duration: walk_duration,
+            };
+            let walk_arrival = time + walk_duration;
+
+            let mut new_segments = segments.clone();
+            new_segments.push(Segment::Walk(walk));
+
+            // Check if walk destination is our destination
+            if walk_to == *destination {
+                if let Ok(journey) = Journey::new(new_segments) {
+                    results.push(journey);
+                }
+            } else {
+                // Recurse (walking doesn't count as a change)
+                reference_dfs(
+                    &walk_to,
+                    walk_arrival,
+                    destination,
+                    new_segments,
+                    changes,
+                    used,
+                    services,
+                    walkable,
+                    config,
+                    results,
+                );
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        /// BFS should find all Pareto-optimal journeys that reference finds
+        #[test]
+        fn bfs_finds_pareto_optimal(network in network_strategy()) {
+            // Skip empty networks
+            if network.is_empty() {
+                return Ok(());
+            }
+
+            // Pick first service as current, destination = last station
+            let current = network[0].clone();
+            let dest = station_crs(5); // FFF
+
+            // Build mock provider
+            let provider = MockProvider { services: network.clone() };
+            let walkable = WalkableConnections::new();
+            let mut config = SearchConfig::default();
+            config.max_changes = 2;
+            config.max_results = 100; // Don't limit results for comparison
+
+            // Run BFS
+            let planner = Planner::new(&provider, &walkable, &config);
+            let request = SearchRequest::new(current.clone(), CallIndex(0), dest);
+
+            // Skip invalid requests
+            if request.validate().is_err() {
+                return Ok(());
+            }
+
+            let bfs_result = planner.search(&request)?;
+
+            // Run reference
+            let ref_journeys = reference_search(
+                &current,
+                CallIndex(0),
+                &dest,
+                &network,
+                &walkable,
+                &config,
+            );
+
+            // Get Pareto-optimal from reference
+            let ref_pareto = remove_dominated(ref_journeys);
+
+            // Every Pareto-optimal journey from reference should have a
+            // non-dominated equivalent in BFS results
+            for ref_j in &ref_pareto {
+                let has_equivalent = bfs_result.journeys.iter().any(|bfs_j| {
+                    // Either same or BFS dominates it (both acceptable)
+                    bfs_j.arrival_time() <= ref_j.arrival_time()
+                        && bfs_j.change_count() <= ref_j.change_count()
+                        && bfs_j.total_duration() <= ref_j.total_duration()
+                });
+
+                prop_assert!(
+                    has_equivalent,
+                    "BFS missed Pareto-optimal journey: arr={:?}, changes={}, dur={:?}",
+                    ref_j.arrival_time(),
+                    ref_j.change_count(),
+                    ref_j.total_duration()
+                );
+            }
+        }
+
+        /// All BFS results should satisfy constraints
+        #[test]
+        fn bfs_respects_constraints(network in network_strategy()) {
+            if network.is_empty() {
+                return Ok(());
+            }
+
+            let current = network[0].clone();
+            let dest = station_crs(5);
+
+            let provider = MockProvider { services: network };
+            let walkable = WalkableConnections::new();
+            let mut config = SearchConfig::default();
+            config.max_changes = 2;
+
+            let planner = Planner::new(&provider, &walkable, &config);
+            let request = SearchRequest::new(current, CallIndex(0), dest);
+
+            if request.validate().is_err() {
+                return Ok(());
+            }
+
+            let result = planner.search(&request)?;
+
+            for journey in &result.journeys {
+                prop_assert!(
+                    journey.change_count() <= config.max_changes,
+                    "Journey exceeds max_changes"
+                );
+            }
+        }
+    }
+
+    // Instrumented test to verify we find journeys sometimes
+    #[test]
+    fn search_finds_some_journeys() {
+        use proptest::test_runner::{Config, TestRunner};
+        use std::cell::Cell;
+
+        let mut runner = TestRunner::new(Config::with_cases(100));
+        let journeys_found = Cell::new(0u32);
+        let tests_with_valid_request = Cell::new(0u32);
+
+        let _ = runner.run(&network_strategy(), |network| {
+            if network.is_empty() {
+                return Ok(());
+            }
+
+            let current = network[0].clone();
+            let dest = station_crs(5);
+
+            let provider = MockProvider {
+                services: network.clone(),
+            };
+            let walkable = WalkableConnections::new();
+            let config = SearchConfig::default();
+
+            let planner = Planner::new(&provider, &walkable, &config);
+            let request = SearchRequest::new(current, CallIndex(0), dest);
+
+            if request.validate().is_ok() {
+                tests_with_valid_request.set(tests_with_valid_request.get() + 1);
+
+                if let Ok(result) = planner.search(&request) {
+                    if !result.journeys.is_empty() {
+                        journeys_found.set(journeys_found.get() + 1);
+                    }
+                }
+            }
+
+            Ok(())
+        });
+
+        // Not all random networks will have routes, but some should
+        // This is informational - print stats
+        println!(
+            "Found journeys in {}/{} valid tests",
+            journeys_found.get(),
+            tests_with_valid_request.get()
+        );
+    }
+}
