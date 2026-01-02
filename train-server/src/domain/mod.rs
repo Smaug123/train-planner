@@ -8,8 +8,10 @@ mod headcode;
 mod operator;
 mod service_uid;
 mod station;
+mod time;
 
 pub use headcode::Headcode;
 pub use operator::{AtocCode, InvalidAtocCode};
 pub use service_uid::{InvalidServiceUid, ServiceUid};
 pub use station::{Crs, InvalidCrs};
+pub use time::{RailTime, TimeError, parse_time_sequence, parse_time_sequence_reverse};
