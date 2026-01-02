@@ -5,7 +5,10 @@
 //! time, so code that receives these types can trust their validity.
 
 mod call;
+mod error;
 mod headcode;
+mod journey;
+mod leg;
 mod operator;
 mod service;
 mod service_uid;
@@ -13,7 +16,10 @@ mod station;
 mod time;
 
 pub use call::{Call, CallIndex};
+pub use error::DomainError;
 pub use headcode::Headcode;
+pub use journey::{Journey, Segment, Walk};
+pub use leg::Leg;
 pub use operator::{AtocCode, InvalidAtocCode};
 pub use service::{Service, ServiceCandidate, ServiceRef};
 pub use service_uid::{InvalidServiceUid, ServiceUid};
