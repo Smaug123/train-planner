@@ -125,19 +125,19 @@ pub fn london_connections() -> WalkableConnections {
     WalkableConnectionsBuilder::new()
         // London termini walking connections
         // Times are approximate walking times in minutes
-        .add("EUS", "KGX", 5)      // Euston ↔ King's Cross (same complex)
-        .add("KGX", "STP", 3)      // King's Cross ↔ St Pancras (adjacent)
-        .add("EUS", "STP", 7)      // Euston ↔ St Pancras
-        .add("PAD", "PAD", 0)      // Paddington (self, for completeness)
-        .add("VIC", "VXH", 15)     // Victoria ↔ Vauxhall (via Tube or walk)
-        .add("WAT", "WLO", 5)      // Waterloo ↔ Waterloo East
-        .add("CHX", "LST", 20)     // Charing Cross ↔ Liverpool Street (via Tube)
-        .add("CST", "MOG", 8)      // Cannon Street ↔ Moorgate
-        .add("LST", "MOG", 10)     // Liverpool Street ↔ Moorgate
-        .add("FST", "CST", 5)      // Fenchurch Street ↔ Cannon Street
-        .add("FST", "LST", 12)     // Fenchurch Street ↔ Liverpool Street
-        .add("LBG", "WAT", 20)     // London Bridge ↔ Waterloo (via Tube)
-        .add("LBG", "CST", 15)     // London Bridge ↔ Cannon Street
+        .add("EUS", "KGX", 5) // Euston ↔ King's Cross (same complex)
+        .add("KGX", "STP", 3) // King's Cross ↔ St Pancras (adjacent)
+        .add("EUS", "STP", 7) // Euston ↔ St Pancras
+        .add("PAD", "PAD", 0) // Paddington (self, for completeness)
+        .add("VIC", "VXH", 15) // Victoria ↔ Vauxhall (via Tube or walk)
+        .add("WAT", "WLO", 5) // Waterloo ↔ Waterloo East
+        .add("CHX", "LST", 20) // Charing Cross ↔ Liverpool Street (via Tube)
+        .add("CST", "MOG", 8) // Cannon Street ↔ Moorgate
+        .add("LST", "MOG", 10) // Liverpool Street ↔ Moorgate
+        .add("FST", "CST", 5) // Fenchurch Street ↔ Cannon Street
+        .add("FST", "LST", 12) // Fenchurch Street ↔ Liverpool Street
+        .add("LBG", "WAT", 20) // London Bridge ↔ Waterloo (via Tube)
+        .add("LBG", "CST", 15) // London Bridge ↔ Cannon Street
         .build()
 }
 
@@ -214,8 +214,8 @@ mod tests {
     fn builder_ignores_invalid_crs() {
         let wc = WalkableConnectionsBuilder::new()
             .add("INVALID", "KGX", 5) // Invalid CRS
-            .add("EUS", "123", 5)     // Invalid CRS (digits)
-            .add("EUS", "KGX", 5)     // Valid
+            .add("EUS", "123", 5) // Invalid CRS (digits)
+            .add("EUS", "KGX", 5) // Valid
             .build();
 
         assert_eq!(wc.len(), 1);

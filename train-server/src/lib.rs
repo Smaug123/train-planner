@@ -5,4 +5,5 @@
 
 pub mod darwin;
 pub mod domain;
+pub mod planner;
 pub mod walkable;
