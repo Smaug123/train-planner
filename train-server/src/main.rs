@@ -37,8 +37,12 @@ async fn main() {
     // Bind and serve
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Train Journey Planner listening on http://{addr}");
-    println!("Endpoints:");
+    println!();
+    println!("Open http://{addr} in your browser for the web interface.");
+    println!();
+    println!("API Endpoints:");
     println!("  GET  /health          - Health check");
+    println!("  GET  /about           - About page");
     println!("  GET  /search/service  - Search for services");
     println!("  POST /journey/plan    - Plan a journey");
 

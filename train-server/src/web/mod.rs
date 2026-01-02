@@ -5,7 +5,9 @@
 mod dto;
 mod routes;
 mod state;
+pub mod templates;
 
 pub use dto::*;
 pub use routes::create_router;
 pub use state::AppState;
+pub use templates::*;

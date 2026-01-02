@@ -1,0 +1,109 @@
+{# This is an HTML fragment returned for AJAX requests #}
+{# It does NOT extend base.html #}
+
+<div class="results-header">
+    <h2>Journey Options</h2>
+    <span class="results-count">{{ journeys.len() }} option{% if journeys.len() != 1 %}s{% endif %} found</span>
+</div>
+
+{% if journeys.is_empty() %}
+<div class="empty-state">
+    <h3>No Journeys Found</h3>
+    <p>No onward connections found to your destination. You may need to wait for later services or consider alternative routes.</p>
+    <button type="button" class="btn btn-secondary" onclick="window.location.reload()">
+        Start New Search
+    </button>
+</div>
+{% else %}
+<div class="journey-list">
+    {% for journey in journeys %}
+    <article class="journey-card">
+        <header class="journey-summary">
+            <div class="journey-time">
+                <span class="time">{{ journey.departure_time }}</span>
+                <span class="label">Depart</span>
+            </div>
+
+            <div class="journey-arrow"></div>
+
+            <div class="journey-time">
+                <span class="time">{{ journey.arrival_time }}</span>
+                <span class="label">Arrive</span>
+            </div>
+
+            <div class="journey-meta">
+                <div class="journey-duration">{{ journey.duration_display }}</div>
+                <div class="journey-changes{% if journey.changes == 0 %} direct{% endif %}">
+                    {% if journey.changes == 0 %}
+                    Direct
+                    {% else if journey.changes == 1 %}
+                    1 change
+                    {% else %}
+                    {{ journey.changes }} changes
+                    {% endif %}
+                </div>
+            </div>
+        </header>
+
+        <div class="journey-segments">
+            {% for segment in journey.segments %}
+            {% match segment %}
+            {% when SegmentView::Train with (leg) %}
+            <div class="segment train">
+                <div class="segment-station origin">
+                    <div class="station-info">
+                        <span class="station-name">{{ leg.origin.name }}</span>
+                        <span class="station-time">{{ leg.origin.time }}</span>
+                    </div>
+                    {% if let Some(platform) = leg.origin.platform %}
+                    <div class="station-platform">Platform {{ platform }}</div>
+                    {% endif %}
+                </div>
+
+                <div class="segment-train">
+                    <div class="train-info">
+                        <span class="operator">{{ leg.operator }}</span>
+                        {% if let Some(headcode) = leg.headcode %}
+                        <span class="headcode">{{ headcode }}</span>
+                        {% endif %}
+                    </div>
+                    {% if leg.stops > 0 %}
+                    <span class="stops">{{ leg.stops }} stop{% if leg.stops != 1 %}s{% endif %}</span>
+                    {% endif %}
+                </div>
+
+                <div class="segment-station destination">
+                    <div class="station-info">
+                        <span class="station-name">{{ leg.destination.name }}</span>
+                        <span class="station-time">{{ leg.destination.time }}</span>
+                    </div>
+                    {% if let Some(platform) = leg.destination.platform %}
+                    <div class="station-platform">Platform {{ platform }}</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% when SegmentView::Walk with (walk) %}
+            <div class="segment walk">
+                <div class="segment-walk">
+                    <span class="walk-icon"></span>
+                    <span>Walk to {{ walk.to_name }} ({{ walk.duration_mins }} min)</span>
+                </div>
+            </div>
+            {% endmatch %}
+            {% endfor %}
+        </div>
+    </article>
+    {% endfor %}
+</div>
+
+<div class="poster-banner" style="margin-top: 2rem;">
+    <p>Safe travels on your continuing journey!</p>
+</div>
+
+<div style="text-align: center; margin-top: 2rem;">
+    <button type="button" class="btn btn-secondary" onclick="window.location.reload()">
+        Plan Another Journey
+    </button>
+</div>
+{% endif %}

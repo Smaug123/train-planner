@@ -2,28 +2,33 @@
 
 use std::sync::Arc;
 
+use askama::Template;
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header, StatusCode, HeaderMap},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{Local, NaiveDate, Timelike};
+use tower_http::services::ServeDir;
 
 use crate::domain::{CallIndex, Crs, Service};
 use crate::planner::{Planner, SearchError, SearchRequest};
 
 use super::dto::*;
 use super::state::AppState;
+use super::templates::*;
 
 /// Create the application router.
 pub fn create_router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(index))
+        .route("/", get(index_page))
         .route("/health", get(health))
+        .route("/about", get(about_page))
         .route("/search/service", get(search_service))
         .route("/journey/plan", post(plan_journey))
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
 }
 
@@ -32,16 +37,34 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Index page (placeholder).
-async fn index() -> &'static str {
-    "Train Journey Planner API"
+/// Index page with search form.
+async fn index_page() -> impl IntoResponse {
+    Html(IndexTemplate.render().unwrap_or_else(|e| {
+        format!("Template error: {}", e)
+    }))
+}
+
+/// About page.
+async fn about_page() -> impl IntoResponse {
+    Html(AboutTemplate.render().unwrap_or_else(|e| {
+        format!("Template error: {}", e)
+    }))
+}
+
+/// Check if request accepts HTML.
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
 }
 
 /// Search for services from a station.
 async fn search_service(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(req): Query<SearchServiceRequest>,
-) -> Result<Json<SearchServiceResponse>, AppError> {
+) -> Result<Response, AppError> {
     // Parse origin CRS
     let origin_crs = Crs::parse(&req.origin).map_err(|_| AppError::BadRequest {
         message: format!("Invalid origin CRS: {}", req.origin),
@@ -98,20 +121,36 @@ async fn search_service(
         services
     };
 
-    // Convert to response
-    let results: Vec<ServiceResult> = services
-        .iter()
-        .map(|s| ServiceResult::from_service(&s.service))
-        .collect();
+    // Return HTML or JSON based on Accept header
+    if accepts_html(&headers) {
+        let service_views: Vec<ServiceView> = services
+            .iter()
+            .map(|s| ServiceView::from_service(&s.service))
+            .collect();
 
-    Ok(Json(SearchServiceResponse { services: results }))
+        let template = ServiceListTemplate { services: service_views };
+        let html = template.render().map_err(|e| AppError::Internal {
+            message: format!("Template error: {}", e),
+        })?;
+
+        Ok(Html(html).into_response())
+    } else {
+        // JSON response
+        let results: Vec<ServiceResult> = services
+            .iter()
+            .map(|s| ServiceResult::from_service(&s.service))
+            .collect();
+
+        Ok(Json(SearchServiceResponse { services: results }).into_response())
+    }
 }
 
 /// Plan a journey from current position to destination.
 async fn plan_journey(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<PlanJourneyRequest>,
-) -> Result<Json<PlanJourneyResponse>, AppError> {
+) -> Result<Response, AppError> {
     // Parse destination CRS
     let dest_crs = Crs::parse(&req.destination).map_err(|_| AppError::BadRequest {
         message: format!("Invalid destination CRS: {}", req.destination),
@@ -149,17 +188,33 @@ async fn plan_journey(
     let planner = Planner::new(&provider, &state.walkable, &state.config);
     let result = planner.search(&search_request).map_err(AppError::from)?;
 
-    // Convert to response
-    let journeys: Vec<JourneyResult> = result
-        .journeys
-        .iter()
-        .map(JourneyResult::from_journey)
-        .collect();
+    // Return HTML or JSON based on Accept header
+    if accepts_html(&headers) {
+        let journey_views: Vec<JourneyView> = result
+            .journeys
+            .iter()
+            .map(JourneyView::from_journey)
+            .collect();
 
-    Ok(Json(PlanJourneyResponse {
-        journeys,
-        routes_explored: result.routes_explored,
-    }))
+        let template = JourneyResultsTemplate { journeys: journey_views };
+        let html = template.render().map_err(|e| AppError::Internal {
+            message: format!("Template error: {}", e),
+        })?;
+
+        Ok(Html(html).into_response())
+    } else {
+        // JSON response
+        let journeys: Vec<JourneyResult> = result
+            .journeys
+            .iter()
+            .map(JourneyResult::from_journey)
+            .collect();
+
+        Ok(Json(PlanJourneyResponse {
+            journeys,
+            routes_explored: result.routes_explored,
+        }).into_response())
+    }
 }
 
 /// Find a service by its Darwin ID.

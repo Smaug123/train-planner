@@ -1,0 +1,93 @@
+{# This is an HTML fragment returned for AJAX requests #}
+{# It does NOT extend base.html #}
+
+<div class="results-header">
+    <h2>Services Found</h2>
+    <span class="results-count">{{ services.len() }} service{% if services.len() != 1 %}s{% endif %}</span>
+</div>
+
+{% if services.is_empty() %}
+<div class="empty-state">
+    <h3>No Services Found</h3>
+    <p>No matching services found. Try adjusting your search criteria.</p>
+</div>
+{% else %}
+<div class="service-list">
+    {% for service in services %}
+    <article class="service-card{% if service.is_cancelled %} cancelled{% endif %}">
+        <header class="service-header">
+            <div class="service-identity">
+                <span class="service-time{% if service.is_delayed() %} delayed{% endif %}">
+                    {{ service.display_time() }}
+                    {% if service.is_delayed() %}
+                    <span class="original">{{ service.scheduled_departure }}</span>
+                    {% endif %}
+                </span>
+                {% if let Some(headcode) = service.headcode %}
+                <span class="headcode">{{ headcode }}</span>
+                {% endif %}
+            </div>
+
+            <div class="service-destination">
+                <h3>{{ service.destination }}</h3>
+                <span class="service-operator">{{ service.operator }}</span>
+            </div>
+
+            {% if let Some(platform) = service.platform %}
+            <div class="service-platform">
+                <span class="platform-label">Platform</span>
+                <span class="platform-number">{{ platform }}</span>
+            </div>
+            {% endif %}
+        </header>
+
+        <div class="service-status-row">
+            {% if service.is_cancelled %}
+            <span class="service-status cancelled">Cancelled</span>
+            {% else if service.is_delayed() %}
+            <span class="service-status delayed">Delayed</span>
+            {% else %}
+            <span class="service-status on-time">On Time</span>
+            {% endif %}
+        </div>
+
+        <div class="calling-points">
+            <button type="button" class="calling-points-toggle">
+                <span class="arrow">&#9654;</span>
+                Show calling points ({{ service.calls.len() }} stops)
+            </button>
+
+            <div class="calling-points-list">
+                {% for call in service.calls %}
+                <div class="calling-point{% if call.is_cancelled %} cancelled{% endif %}">
+                    <div class="calling-point-time">
+                        {{ call.display_time() }}
+                        {% if call.is_delayed() %}
+                        <span class="delayed">(was {{ call.scheduled_time }})</span>
+                        {% endif %}
+                    </div>
+                    <div class="calling-point-name">
+                        {{ call.name }}
+                        <span class="calling-point-crs">({{ call.crs }})</span>
+                    </div>
+                    <div class="calling-point-actions">
+                        {% if let Some(platform) = call.platform %}
+                        <span class="calling-point-platform">Plat. {{ platform }}</span>
+                        {% endif %}
+                        {% if !call.is_cancelled && call.has_subsequent_stops %}
+                        <button type="button"
+                                class="btn btn-secondary select-position-btn"
+                                data-service-id="{{ service.service_id }}"
+                                data-position-idx="{{ call.index }}">
+                            I'm here
+                        </button>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </article>
+    {% endfor %}
+</div>
+{% endif %}

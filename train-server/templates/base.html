@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Continuing Journey Planner{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="header-content">
+            <div class="logo">
+                <a href="/">
+                    <span class="logo-mark"><!-- Stylised train silhouette would go here --></span>
+                    <span class="logo-text">British Railways</span>
+                </a>
+            </div>
+            <nav class="main-nav">
+                <a href="/">Plan Journey</a>
+                <a href="/about">About</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-content">
+            <p class="tagline">The Railway Will Take You Anywhere</p>
+            <p class="attribution">Continuing Journey Planner &middot; Not affiliated with National Rail</p>
+        </div>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
