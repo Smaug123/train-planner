@@ -287,14 +287,20 @@ impl LegResult {
         let origin = StationInfo {
             crs: leg.board_call().station.as_str().to_string(),
             name: leg.board_call().station_name.clone(),
-            time: leg.board_call().expected_departure().map(|t| format_time(&t)),
+            time: leg
+                .board_call()
+                .expected_departure()
+                .map(|t| format_time(&t)),
             platform: leg.board_call().platform.clone(),
         };
 
         let destination = StationInfo {
             crs: leg.alight_call().station.as_str().to_string(),
             name: leg.alight_call().station_name.clone(),
-            time: leg.alight_call().expected_arrival().map(|t| format_time(&t)),
+            time: leg
+                .alight_call()
+                .expected_arrival()
+                .map(|t| format_time(&t)),
             platform: leg.alight_call().platform.clone(),
         };
 
@@ -546,7 +552,10 @@ mod bug_tests {
         );
 
         // This documents the actual (buggy) behavior:
-        assert_eq!(result.from.name, "KGX", "Walk.from.name is CRS code, not name");
+        assert_eq!(
+            result.from.name, "KGX",
+            "Walk.from.name is CRS code, not name"
+        );
         assert_eq!(result.to.name, "STP", "Walk.to.name is CRS code, not name");
     }
 

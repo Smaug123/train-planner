@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use chrono::{Local, NaiveDate, Timelike};
 
@@ -67,13 +67,11 @@ async fn search_service(
 
     // Fetch departures
     let services = match dest_crs {
-        Some(dest) => {
-            state
-                .darwin
-                .get_departures_to(&origin_crs, date, current_mins, 0, 120, &dest)
-                .await
-                .map_err(AppError::from)?
-        }
+        Some(dest) => state
+            .darwin
+            .get_departures_to(&origin_crs, date, current_mins, 0, 120, &dest)
+            .await
+            .map_err(AppError::from)?,
         None => {
             let all = state
                 .darwin

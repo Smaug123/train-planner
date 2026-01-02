@@ -19,6 +19,8 @@ pub struct WalkableConnections {
     /// Map from (from, to) to walk duration in minutes.
     /// Stored in both directions for O(1) lookup.
     connections: HashMap<(Crs, Crs), i64>,
+    /// Count of unique pairs (not counting both directions).
+    pair_count: usize,
 }
 
 impl WalkableConnections {
@@ -30,9 +32,33 @@ impl WalkableConnections {
     /// Add a walkable connection between two stations.
     ///
     /// The connection is stored symmetrically (both A→B and B→A).
+    /// If the connection already exists, keeps the shorter duration.
+    /// Self-connections (A→A) are ignored as they have no meaning.
     pub fn add(&mut self, from: Crs, to: Crs, duration_minutes: i64) {
-        self.connections.insert((from, to), duration_minutes);
-        self.connections.insert((to, from), duration_minutes);
+        // Ignore self-connections - walking from a station to itself is meaningless
+        if from == to {
+            return;
+        }
+
+        // Check if this pair already exists
+        let existing = self.connections.get(&(from, to)).copied();
+
+        match existing {
+            Some(existing_duration) => {
+                // Keep the shorter duration
+                if duration_minutes < existing_duration {
+                    self.connections.insert((from, to), duration_minutes);
+                    self.connections.insert((to, from), duration_minutes);
+                }
+                // If new duration is longer or equal, don't update
+            }
+            None => {
+                // New pair - insert and increment count
+                self.connections.insert((from, to), duration_minutes);
+                self.connections.insert((to, from), duration_minutes);
+                self.pair_count += 1;
+            }
+        }
     }
 
     /// Get the walk duration between two stations, if walkable.
@@ -60,12 +86,12 @@ impl WalkableConnections {
 
     /// Returns the number of walkable pairs (counting A→B and B→A as one).
     pub fn len(&self) -> usize {
-        self.connections.len() / 2
+        self.pair_count
     }
 
     /// Returns true if there are no walkable connections.
     pub fn is_empty(&self) -> bool {
-        self.connections.is_empty()
+        self.pair_count == 0
     }
 
     /// Create a closure suitable for `Journey::from_legs`.
@@ -244,106 +270,85 @@ mod tests {
     }
 }
 
-/// Tests that demonstrate bugs in the current implementation.
-/// These tests are expected to FAIL until the bugs are fixed.
+/// Tests for fixed behavior that was previously buggy.
 #[cfg(test)]
-mod bug_tests {
+mod fixed_behavior_tests {
     use super::*;
 
     fn crs(s: &str) -> Crs {
         Crs::parse(s).unwrap()
     }
 
-    /// BUG: len() is incorrect when self-connections exist.
+    /// FIXED: Self-connections are now ignored.
     ///
-    /// The len() method divides by 2 assuming all connections are stored
-    /// twice (A→B and B→A). But self-connections (A→A) are only stored once,
-    /// making the count wrong.
-    ///
-    /// london_connections() includes PAD→PAD as a self-connection.
+    /// Walking from a station to itself is meaningless, so add() ignores these.
     #[test]
-    fn bug_len_with_self_connection() {
+    fn self_connections_ignored() {
         let mut wc = WalkableConnections::new();
 
-        // Add a normal connection (stored twice: A→B and B→A)
+        // Add a normal connection
         wc.add(crs("EUS"), crs("KGX"), 5);
 
-        // Add a self-connection (stored once: PAD→PAD)
+        // Try to add a self-connection - should be ignored
         wc.add(crs("PAD"), crs("PAD"), 0);
 
-        // Internal map has 3 entries: EUS→KGX, KGX→EUS, PAD→PAD
-        // len() returns connections.len() / 2 = 3 / 2 = 1
-        // But we added 2 logical connections!
-        assert_eq!(
-            wc.len(),
-            2,
-            "Expected 2 connections (EUS↔KGX and PAD↔PAD), but len() returns wrong value"
-        );
+        // Only the real connection should exist
+        assert_eq!(wc.len(), 1, "Self-connection should be ignored");
+        assert!(wc.is_walkable(&crs("EUS"), &crs("KGX")));
+        assert!(!wc.is_walkable(&crs("PAD"), &crs("PAD")));
     }
 
-    /// BUG: london_connections() has this bug.
+    /// FIXED: london_connections() len is correct.
     ///
-    /// It includes .add("PAD", "PAD", 0) which is a self-connection,
-    /// causing len() to undercount.
+    /// PAD→PAD is ignored, leaving 12 valid connections.
     #[test]
-    fn bug_london_connections_len() {
+    fn london_connections_len_correct() {
         let wc = london_connections();
 
         // Count the actual connections defined in london_connections():
-        // EUS↔KGX, KGX↔STP, EUS↔STP, PAD↔PAD (self), VIC↔VXH, WAT↔WLO,
+        // EUS↔KGX, KGX↔STP, EUS↔STP, VIC↔VXH, WAT↔WLO,
         // CHX↔LST, CST↔MOG, LST↔MOG, FST↔CST, FST↔LST, LBG↔WAT, LBG↔CST
-        // = 13 pairs
-        //
-        // Internal storage: 12 pairs × 2 + 1 self = 25 entries
-        // len() = 25 / 2 = 12 (wrong, should be 13)
-
-        // We can verify by counting walkable_from for all stations
-        let stations = ["EUS", "KGX", "STP", "PAD", "VIC", "VXH", "WAT", "WLO",
-                        "CHX", "LST", "CST", "MOG", "FST", "LBG"];
-        let mut total_edges = 0;
-        for s in &stations {
-            if let Ok(c) = Crs::parse(s) {
-                total_edges += wc.walkable_from(&c).len();
-            }
-        }
-        // Each connection is counted twice (once from each end), except self-connections
-        // So: (total_edges + self_connections) / 2 = actual connections
-        // With PAD→PAD: (total_edges + 1) / 2 should equal wc.len()
-        // But len() uses raw division, so this will be off
-
-        // The actual number of defined pairs is 13
-        // If len() is correct, this should pass:
+        // = 12 pairs (PAD→PAD is ignored as a self-connection)
         assert_eq!(
             wc.len(),
-            13,
-            "london_connections() defines 13 pairs but len() returns wrong count"
+            12,
+            "london_connections() should have 12 valid pairs (PAD→PAD ignored)"
         );
     }
 
-    /// BUG: Adding the same connection twice overwrites silently.
-    ///
-    /// There's no error or deduplication tracking when adding a connection
-    /// that already exists with a different duration.
+    /// FIXED: Adding same connection twice keeps shorter duration.
     #[test]
-    fn bug_duplicate_connection_overwrites() {
+    fn duplicate_connection_keeps_shorter() {
         let mut wc = WalkableConnections::new();
 
         wc.add(crs("EUS"), crs("KGX"), 5);
-        wc.add(crs("EUS"), crs("KGX"), 10); // Different duration!
+        wc.add(crs("EUS"), crs("KGX"), 10); // Longer duration - should be ignored
 
-        // Should this be an error? Or should we keep the first/shorter?
-        // Currently it silently overwrites.
-
-        // At minimum, len() should still be correct:
         assert_eq!(wc.len(), 1, "Duplicate add should not increase len");
 
-        // But which duration do we have? The second one overwrote the first.
-        // If we wanted "keep shorter", this would fail:
         let duration = wc.get(&crs("EUS"), &crs("KGX")).unwrap();
         assert_eq!(
             duration,
             Duration::minutes(5),
-            "Expected to keep the original/shorter duration, but got overwritten"
+            "Should keep the shorter duration"
+        );
+    }
+
+    /// FIXED: Adding shorter duration updates existing connection.
+    #[test]
+    fn duplicate_connection_updates_to_shorter() {
+        let mut wc = WalkableConnections::new();
+
+        wc.add(crs("EUS"), crs("KGX"), 10); // Longer first
+        wc.add(crs("EUS"), crs("KGX"), 5); // Shorter second - should update
+
+        assert_eq!(wc.len(), 1, "Duplicate add should not increase len");
+
+        let duration = wc.get(&crs("EUS"), &crs("KGX")).unwrap();
+        assert_eq!(
+            duration,
+            Duration::minutes(5),
+            "Should update to shorter duration"
         );
     }
 }

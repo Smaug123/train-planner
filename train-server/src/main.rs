@@ -4,7 +4,7 @@ use train_server::cache::{CacheConfig, CachedDarwinClient};
 use train_server::darwin::{DarwinClient, DarwinConfig};
 use train_server::planner::SearchConfig;
 use train_server::walkable::london_connections;
-use train_server::web::{create_router, AppState};
+use train_server::web::{AppState, create_router};
 
 #[tokio::main]
 async fn main() {

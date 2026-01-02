@@ -560,19 +560,25 @@ mod proptests {
         let booked_used = Cell::new(0u32);
         let none_returned = Cell::new(0u32);
 
-        let _ = runner.run(&(opt_time(), opt_time(), 0usize..100), |(booked, realtime, station_idx)| {
-            let mut call = Call::new(crs_from_idx(station_idx), format!("Station {}", station_idx));
-            call.booked_arrival = booked.map(|(h, m)| make_time(h, m));
-            call.realtime_arrival = realtime.map(|(h, m)| make_time(h, m));
+        let _ = runner.run(
+            &(opt_time(), opt_time(), 0usize..100),
+            |(booked, realtime, station_idx)| {
+                let mut call = Call::new(
+                    crs_from_idx(station_idx),
+                    format!("Station {}", station_idx),
+                );
+                call.booked_arrival = booked.map(|(h, m)| make_time(h, m));
+                call.realtime_arrival = realtime.map(|(h, m)| make_time(h, m));
 
-            match (call.expected_arrival(), realtime, booked) {
-                (Some(_), Some(_), _) => realtime_used.set(realtime_used.get() + 1),
-                (Some(_), None, Some(_)) => booked_used.set(booked_used.get() + 1),
-                (None, _, _) => none_returned.set(none_returned.get() + 1),
-                _ => {}
-            }
-            Ok(())
-        });
+                match (call.expected_arrival(), realtime, booked) {
+                    (Some(_), Some(_), _) => realtime_used.set(realtime_used.get() + 1),
+                    (Some(_), None, Some(_)) => booked_used.set(booked_used.get() + 1),
+                    (None, _, _) => none_returned.set(none_returned.get() + 1),
+                    _ => {}
+                }
+                Ok(())
+            },
+        );
 
         // Verify we're testing all three branches
         assert!(realtime_used.get() > 0, "Should test realtime path");
@@ -580,7 +586,9 @@ mod proptests {
         assert!(none_returned.get() > 0, "Should test None path");
         println!(
             "expected_arrival distribution: {} realtime, {} booked, {} none",
-            realtime_used.get(), booked_used.get(), none_returned.get()
+            realtime_used.get(),
+            booked_used.get(),
+            none_returned.get()
         );
     }
 }

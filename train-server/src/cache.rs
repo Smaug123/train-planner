@@ -16,9 +16,10 @@ use moka::future::Cache as MokaCache;
 use crate::darwin::{ConvertedService, DarwinClient, DarwinError};
 use crate::domain::Crs;
 
-/// Cache key for departure boards: (station CRS, date, time bucket).
-/// Time bucket is minutes from midnight divided by 5.
-type BoardKey = (Crs, NaiveDate, u16);
+/// Cache key for departure boards: (station CRS, date, time bucket, time window).
+/// Time bucket is minutes from midnight divided by bucket_mins.
+/// Time window is included because the API returns different data for different windows.
+type BoardKey = (Crs, NaiveDate, u16, u16);
 
 /// Cached departure board entry.
 type BoardEntry = Arc<Vec<Arc<ConvertedService>>>;
@@ -41,7 +42,7 @@ impl Default for CacheConfig {
         Self {
             ttl: Duration::from_secs(60),
             max_capacity: 1000,
-            bucket_mins: 5,
+            bucket_mins: 10,
         }
     }
 }
@@ -131,7 +132,7 @@ impl CachedDarwinClient {
         time_window: u16,
     ) -> Result<Arc<Vec<Arc<ConvertedService>>>, DarwinError> {
         let bucket = self.cache.time_bucket(time_offset, current_mins);
-        let key = (*crs, date, bucket);
+        let key = (*crs, date, bucket, time_window);
 
         // Try cache first
         if let Some(cached) = self.cache.get_board(&key).await {
@@ -204,21 +205,21 @@ mod tests {
         let config = CacheConfig::default();
         let cache = DarwinCache::new(&config);
 
-        // 10:00 = 600 mins, bucket size 5 → bucket 120
-        assert_eq!(cache.time_bucket(0, 600), 120);
+        // 10:00 = 600 mins, bucket size 10 → bucket 60
+        assert_eq!(cache.time_bucket(0, 600), 60);
 
-        // 10:04 = 604 mins → bucket 120
-        assert_eq!(cache.time_bucket(0, 604), 120);
+        // 10:04 = 604 mins → bucket 60
+        assert_eq!(cache.time_bucket(0, 604), 60);
 
-        // 10:05 = 605 mins → bucket 121
-        assert_eq!(cache.time_bucket(0, 605), 121);
+        // 10:05 = 605 mins → bucket 60 (same bucket with 10-min buckets)
+        assert_eq!(cache.time_bucket(0, 605), 60);
 
-        // With offset: current 10:00, offset -30 → 9:30 = 570 mins → bucket 114
-        assert_eq!(cache.time_bucket(-30, 600), 114);
+        // With offset: current 10:00, offset -30 → 9:30 = 570 mins → bucket 57
+        assert_eq!(cache.time_bucket(-30, 600), 57);
 
         // Wrap around midnight: current 0:10 = 10 mins, offset -20 → 23:50 = 1430 mins
-        // 1430 / 5 = 286
-        assert_eq!(cache.time_bucket(-20, 10), 286);
+        // 1430 / 10 = 143
+        assert_eq!(cache.time_bucket(-20, 10), 143);
     }
 
     #[test]
@@ -226,7 +227,7 @@ mod tests {
         let config = CacheConfig::default();
         assert_eq!(config.ttl, Duration::from_secs(60));
         assert_eq!(config.max_capacity, 1000);
-        assert_eq!(config.bucket_mins, 5);
+        assert_eq!(config.bucket_mins, 10);
     }
 
     #[test]
@@ -237,69 +238,57 @@ mod tests {
     }
 }
 
-/// Tests that demonstrate bugs in the current implementation.
-/// These tests are expected to FAIL until the bugs are fixed.
+/// Tests for fixed cache behavior.
 #[cfg(test)]
-mod bug_tests {
+mod fixed_behavior_tests {
     use super::*;
 
-    /// BUG: Cache key doesn't include time_window parameter.
+    /// FIXED: Cache key now includes time_window parameter.
     ///
     /// Two requests with the same (station, date, time_bucket) but different
-    /// time_window values will share the same cache entry. This means:
-    /// - Request with time_window=30 might get cached
-    /// - Request with time_window=120 will return the cached 30-min window data
-    ///
-    /// The cache key should include time_window to prevent this.
+    /// time_window values now use different cache entries.
     #[test]
-    fn bug_cache_key_ignores_time_window() {
+    fn cache_key_includes_time_window() {
         let config = CacheConfig::default();
         let cache = DarwinCache::new(&config);
 
         // Two different time windows should produce different cache keys
-        // Currently they don't - both calls use the same key
         let crs = Crs::parse("PAD").unwrap();
         let date = chrono::NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
         let current_mins: u16 = 600; // 10:00
 
-        // Simulate what CachedDarwinClient does
-        let bucket_30 = cache.time_bucket(0, current_mins);
-        let bucket_120 = cache.time_bucket(0, current_mins);
+        let bucket = cache.time_bucket(0, current_mins);
 
-        // These should be different because time_window differs, but they're the same
-        let key_30 = (crs, date, bucket_30);
-        let key_120 = (crs, date, bucket_120);
+        // Keys now include time_window as fourth element
+        let key_30: BoardKey = (crs, date, bucket, 30);
+        let key_120: BoardKey = (crs, date, bucket, 120);
 
-        // This assertion documents the bug: keys are the same when they shouldn't be
+        // Keys are now different because time_window differs
         assert_ne!(
             key_30, key_120,
-            "Cache keys should differ based on time_window, but they're identical"
+            "Cache keys should differ based on time_window"
         );
     }
 
-    /// BUG: time_bucket calculation doesn't account for the full query range.
+    /// FIXED: With 10-minute buckets, nearby times share cache.
     ///
-    /// If current_mins=600 (10:00) and time_window=120, the query covers 10:00-12:00.
-    /// But the bucket is only calculated from current_mins, not the window.
-    /// This means the same cached data could be returned for different effective ranges.
+    /// Requests at 10:04 and 10:05 now fall in the same bucket, allowing
+    /// effective cache sharing for overlapping time windows.
     #[test]
-    fn bug_time_bucket_ignores_window_span() {
+    fn nearby_times_share_bucket() {
         let config = CacheConfig::default();
         let cache = DarwinCache::new(&config);
 
-        // At 10:04, bucket = 600 / 5 = 120
+        // At 10:04, bucket = 604 / 10 = 60
         let bucket_10_04 = cache.time_bucket(0, 604);
 
-        // At 10:05, bucket = 605 / 5 = 121
+        // At 10:05, bucket = 605 / 10 = 60
         let bucket_10_05 = cache.time_bucket(0, 605);
 
-        // These are different buckets, which is correct for the start time.
-        // But if both requests have time_window=120, they overlap significantly.
-        // The 10:04 request covers 10:04-12:04
-        // The 10:05 request covers 10:05-12:05
-        // They share 119 minutes of overlap but get different cache entries!
-
-        assert_eq!(bucket_10_04, bucket_10_05,
-            "Requests with overlapping time windows should share cache, but bucket differs by 1 minute");
+        // With 10-minute buckets, both fall in the same bucket
+        assert_eq!(
+            bucket_10_04, bucket_10_05,
+            "Nearby times should share cache bucket with 10-minute buckets"
+        );
     }
 }

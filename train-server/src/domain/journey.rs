@@ -574,11 +574,7 @@ mod proptests {
     }
 
     /// Generate a valid service from station i to station i+1 with given times.
-    fn make_simple_service(
-        station_idx: usize,
-        dep_mins: u16,
-        duration_mins: u16,
-    ) -> Arc<Service> {
+    fn make_simple_service(station_idx: usize, dep_mins: u16, duration_mins: u16) -> Arc<Service> {
         let from_crs = crs_from_idx(station_idx);
         let to_crs = crs_from_idx(station_idx + 1);
 
@@ -610,9 +606,9 @@ mod proptests {
         (1usize..=max_legs).prop_flat_map(|num_legs| {
             proptest::collection::vec(
                 (
-                    0usize..100,      // station_idx (will be adjusted to be sequential)
-                    0u16..1300,       // dep_mins
-                    10u16..120,       // duration
+                    0usize..100, // station_idx (will be adjusted to be sequential)
+                    0u16..1300,  // dep_mins
+                    10u16..120,  // duration
                 ),
                 num_legs,
             )
@@ -784,14 +780,8 @@ mod proptests {
         });
 
         // Verify we're testing both single and multi-leg journeys
-        assert!(
-            single_leg.get() > 0,
-            "Should test some single-leg journeys"
-        );
-        assert!(
-            multi_leg.get() > 0,
-            "Should test some multi-leg journeys"
-        );
+        assert!(single_leg.get() > 0, "Should test some single-leg journeys");
+        assert!(multi_leg.get() > 0, "Should test some multi-leg journeys");
         println!(
             "Journey distribution: {} single-leg, {} multi-leg out of {} valid",
             single_leg.get(),
