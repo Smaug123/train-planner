@@ -49,6 +49,7 @@ This is a Rust web application for planning train journey connections. The user 
 ## Environment Variables
 
 ```bash
-DARWIN_API_KEY=<from Rail Data Marketplace>
+DARWIN_USERNAME=<username from Rail Data Marketplace>
+DARWIN_PASSWORD=<password from Rail Data Marketplace>
 LISTEN_ADDR=127.0.0.1:3000
 ```

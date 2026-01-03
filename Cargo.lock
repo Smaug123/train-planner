@@ -1684,6 +1684,7 @@ dependencies = [
  "askama",
  "askama_axum",
  "axum",
+ "base64",
  "chrono",
  "moka",
  "proptest",

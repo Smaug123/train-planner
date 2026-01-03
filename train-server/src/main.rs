@@ -8,14 +8,18 @@ use train_server::web::{AppState, create_router};
 
 #[tokio::main]
 async fn main() {
-    // Get API key from environment
-    let api_key = std::env::var("DARWIN_API_KEY").unwrap_or_else(|_| {
-        eprintln!("Warning: DARWIN_API_KEY not set. API calls will fail.");
+    // Get credentials from environment
+    let username = std::env::var("DARWIN_USERNAME").unwrap_or_else(|_| {
+        eprintln!("Warning: DARWIN_USERNAME not set. API calls will fail.");
+        String::new()
+    });
+    let password = std::env::var("DARWIN_PASSWORD").unwrap_or_else(|_| {
+        eprintln!("Warning: DARWIN_PASSWORD not set. API calls will fail.");
         String::new()
     });
 
     // Create Darwin client
-    let darwin_config = DarwinConfig::new(api_key);
+    let darwin_config = DarwinConfig::new(username, password);
     let darwin_client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
 
     // Create cached client
