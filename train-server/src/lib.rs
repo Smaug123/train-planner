@@ -6,6 +6,7 @@
 pub mod cache;
 pub mod darwin;
 pub mod domain;
+pub mod identify;
 pub mod planner;
 pub mod walkable;
 pub mod web;

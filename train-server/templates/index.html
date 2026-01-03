@@ -20,7 +20,38 @@
 </div>
 
 <div class="search-panel">
-    <h2>Find Your Train</h2>
+    <h2>Already on a Train?</h2>
+
+    <form id="identify-form" action="/identify" method="GET">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="next_station">Next Stop</label>
+                <input type="text" id="next_station" name="next_station"
+                       placeholder="e.g. WDB"
+                       required
+                       maxlength="3"
+                       autocomplete="off">
+                <p class="hint">The next station your train will call at</p>
+            </div>
+
+            <div class="form-group">
+                <label for="terminus">Terminates At (Optional)</label>
+                <input type="text" id="terminus" name="terminus"
+                       placeholder="e.g. IPS"
+                       maxlength="3"
+                       autocomplete="off">
+                <p class="hint">Where your train terminates</p>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block">
+            Identify My Train
+        </button>
+    </form>
+</div>
+
+<div class="search-panel">
+    <h2>Search by Departure Station</h2>
 
     <form id="search-form" action="/search/service" method="GET">
         <div class="form-group">
@@ -75,19 +106,18 @@
     'use strict';
 
     const searchForm = document.getElementById('search-form');
+    const identifyForm = document.getElementById('identify-form');
     const resultsContainer = document.getElementById('results-container');
 
-    // Handle form submission
-    searchForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-
-        const formData = new FormData(searchForm);
+    // Generic form submission handler
+    function submitForm(form, endpoint, loadingMessage) {
+        const formData = new FormData(form);
         const params = new URLSearchParams();
 
         // Only add non-empty values
         for (const [key, value] of formData.entries()) {
             if (value.trim()) {
-                params.append(key, value.trim());
+                params.append(key, value.trim().toUpperCase());
             }
         }
 
@@ -95,19 +125,19 @@
         resultsContainer.innerHTML = `
             <div class="loading">
                 <div class="loading-spinner"></div>
-                <p class="loading-text">Searching for services...</p>
+                <p class="loading-text">${loadingMessage}</p>
             </div>
         `;
 
         // Fetch results
-        fetch('/search/service?' + params.toString(), {
+        fetch(endpoint + '?' + params.toString(), {
             headers: {
                 'Accept': 'text/html'
             }
         })
         .then(function(response) {
             if (!response.ok) {
-                throw new Error('Search failed');
+                throw new Error('Request failed');
             }
             return response.text();
         })
@@ -118,11 +148,23 @@
         .catch(function(error) {
             resultsContainer.innerHTML = `
                 <div class="error-message">
-                    <h3>Search Failed</h3>
-                    <p>Unable to fetch services. Please check your input and try again.</p>
+                    <h3>Request Failed</h3>
+                    <p>Unable to fetch results. Please check your input and try again.</p>
                 </div>
             `;
         });
+    }
+
+    // Handle identify form submission
+    identifyForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitForm(identifyForm, '/identify', 'Identifying your train...');
+    });
+
+    // Handle search form submission
+    searchForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitForm(searchForm, '/search/service', 'Searching for services...');
     });
 
     // Initialize calling point toggles for dynamically loaded content

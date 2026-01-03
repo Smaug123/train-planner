@@ -45,6 +45,15 @@ pub struct JourneyResultsTemplate {
     pub journeys: Vec<JourneyView>,
 }
 
+/// Train identification results fragment.
+#[derive(Template)]
+#[template(path = "identify_results.html")]
+pub struct IdentifyResultsTemplate {
+    pub matches: Vec<TrainMatchView>,
+    pub next_station: String,
+    pub terminus: Option<String>,
+}
+
 // ============================================================================
 // View Models (for templates)
 // ============================================================================
@@ -310,6 +319,17 @@ pub struct StationView {
     pub name: String,
     pub time: String,
     pub platform: Option<String>,
+}
+
+/// Train match view model for identification results.
+#[derive(Debug, Clone)]
+pub struct TrainMatchView {
+    /// The matched service
+    pub service: ServiceView,
+    /// RTT search URL for verification
+    pub rtt_url: String,
+    /// Whether this is an exact match (both next station and terminus)
+    pub is_exact: bool,
 }
 
 #[cfg(test)]

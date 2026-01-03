@@ -4,6 +4,7 @@
 
 mod dto;
 mod routes;
+mod rtt;
 mod state;
 pub mod templates;
 

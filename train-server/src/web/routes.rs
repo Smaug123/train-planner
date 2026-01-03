@@ -6,7 +6,7 @@ use askama::Template;
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::{header, StatusCode, HeaderMap},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -27,6 +27,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/about", get(about_page))
         .route("/search/service", get(search_service))
+        .route("/identify", get(identify_train))
         .route("/journey/plan", post(plan_journey))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
@@ -39,16 +40,20 @@ async fn health() -> &'static str {
 
 /// Index page with search form.
 async fn index_page() -> impl IntoResponse {
-    Html(IndexTemplate.render().unwrap_or_else(|e| {
-        format!("Template error: {}", e)
-    }))
+    Html(
+        IndexTemplate
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
+    )
 }
 
 /// About page.
 async fn about_page() -> impl IntoResponse {
-    Html(AboutTemplate.render().unwrap_or_else(|e| {
-        format!("Template error: {}", e)
-    }))
+    Html(
+        AboutTemplate
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
+    )
 }
 
 /// Check if request accepts HTML.
@@ -128,7 +133,9 @@ async fn search_service(
             .map(|s| ServiceView::from_service(&s.service))
             .collect();
 
-        let template = ServiceListTemplate { services: service_views };
+        let template = ServiceListTemplate {
+            services: service_views,
+        };
         let html = template.render().map_err(|e| AppError::Internal {
             message: format!("Template error: {}", e),
         })?;
@@ -139,6 +146,90 @@ async fn search_service(
         let results: Vec<ServiceResult> = services
             .iter()
             .map(|s| ServiceResult::from_service(&s.service))
+            .collect();
+
+        Ok(Json(SearchServiceResponse { services: results }).into_response())
+    }
+}
+
+/// Identify the user's current train by next station and terminus.
+async fn identify_train(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(req): Query<IdentifyTrainWebRequest>,
+) -> Result<Response, AppError> {
+    use super::rtt::rtt_search_url_default;
+    use crate::domain::MatchConfidence;
+    use crate::identify::filter_and_rank_matches;
+
+    // Parse next station CRS
+    let next_station = Crs::parse(&req.next_station).map_err(|_| AppError::BadRequest {
+        message: format!("Invalid next station CRS: {}", req.next_station),
+    })?;
+
+    // Parse optional terminus CRS
+    let terminus = req
+        .terminus
+        .as_ref()
+        .filter(|t| !t.is_empty())
+        .map(|t| Crs::parse(t))
+        .transpose()
+        .map_err(|_| AppError::BadRequest {
+            message: format!(
+                "Invalid terminus CRS: {}",
+                req.terminus.as_deref().unwrap_or("")
+            ),
+        })?;
+
+    // Get current time info
+    let now = Local::now();
+    let date = now.date_naive();
+    let current_mins = (now.time().hour() * 60 + now.time().minute()) as u16;
+
+    // Query the NEXT station's departure board
+    // Trains departing in next ~30 mins from that station
+    let services = state
+        .darwin
+        .get_departures_with_details(&next_station, date, current_mins, 0, 30)
+        .await
+        .map_err(AppError::from)?;
+
+    // Filter and rank matches using the extracted logic
+    let matches = filter_and_rank_matches(&services, terminus.as_ref());
+
+    // Return HTML or JSON based on Accept header
+    if accepts_html(&headers) {
+        let match_views: Vec<TrainMatchView> = matches
+            .iter()
+            .map(|m| {
+                let dep_time = m
+                    .service
+                    .candidate
+                    .expected_departure
+                    .unwrap_or(m.service.candidate.scheduled_departure);
+                TrainMatchView {
+                    service: ServiceView::from_service(&m.service.service),
+                    rtt_url: rtt_search_url_default(&next_station, date, dep_time),
+                    is_exact: m.confidence == MatchConfidence::Exact,
+                }
+            })
+            .collect();
+
+        let template = IdentifyResultsTemplate {
+            matches: match_views,
+            next_station: next_station.as_str().to_string(),
+            terminus: terminus.map(|t| t.as_str().to_string()),
+        };
+        let html = template.render().map_err(|e| AppError::Internal {
+            message: format!("Template error: {}", e),
+        })?;
+
+        Ok(Html(html).into_response())
+    } else {
+        // JSON response - reuse ServiceResult format
+        let results: Vec<ServiceResult> = matches
+            .iter()
+            .map(|m| ServiceResult::from_service(&m.service.service))
             .collect();
 
         Ok(Json(SearchServiceResponse { services: results }).into_response())
@@ -196,7 +287,9 @@ async fn plan_journey(
             .map(JourneyView::from_journey)
             .collect();
 
-        let template = JourneyResultsTemplate { journeys: journey_views };
+        let template = JourneyResultsTemplate {
+            journeys: journey_views,
+        };
         let html = template.render().map_err(|e| AppError::Internal {
             message: format!("Template error: {}", e),
         })?;
@@ -213,7 +306,8 @@ async fn plan_journey(
         Ok(Json(PlanJourneyResponse {
             journeys,
             routes_explored: result.routes_explored,
-        }).into_response())
+        })
+        .into_response())
     }
 }
 

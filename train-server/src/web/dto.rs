@@ -20,6 +20,16 @@ pub struct SearchServiceRequest {
     pub headcode: Option<String>,
 }
 
+/// Request to identify the user's current train.
+#[derive(Debug, Deserialize)]
+pub struct IdentifyTrainWebRequest {
+    /// Next station the train will call at (required).
+    pub next_station: String,
+
+    /// Final destination of the train (optional).
+    pub terminus: Option<String>,
+}
+
 /// A service in search results.
 #[derive(Debug, Serialize)]
 pub struct ServiceResult {

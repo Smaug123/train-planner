@@ -7,6 +7,7 @@
 mod call;
 mod error;
 mod headcode;
+mod identify;
 mod journey;
 mod leg;
 mod operator;
@@ -18,6 +19,7 @@ mod time;
 pub use call::{Call, CallIndex};
 pub use error::DomainError;
 pub use headcode::Headcode;
+pub use identify::{IdentifyTrainRequest, MatchConfidence};
 pub use journey::{Journey, Segment, Walk};
 pub use leg::Leg;
 pub use operator::{AtocCode, InvalidAtocCode};

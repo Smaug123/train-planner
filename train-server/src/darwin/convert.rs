@@ -33,6 +33,7 @@ pub enum ConversionError {
 }
 
 /// Result of converting a Darwin service item.
+#[derive(Debug, Clone)]
 pub struct ConvertedService {
     /// Summary info for display on departure boards
     pub candidate: ServiceCandidate,
