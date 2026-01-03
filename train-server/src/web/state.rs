@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::cache::CachedDarwinClient;
 use crate::planner::SearchConfig;
+use crate::stations::StationNames;
 use crate::walkable::WalkableConnections;
 
 /// Shared application state.
@@ -19,6 +20,9 @@ pub struct AppState {
 
     /// Journey planner configuration
     pub config: Arc<SearchConfig>,
+
+    /// Station CRS → name lookup
+    pub station_names: StationNames,
 }
 
 impl AppState {
@@ -27,11 +31,13 @@ impl AppState {
         darwin: CachedDarwinClient,
         walkable: WalkableConnections,
         config: SearchConfig,
+        station_names: StationNames,
     ) -> Self {
         Self {
             darwin: Arc::new(darwin),
             walkable: Arc::new(walkable),
             config: Arc::new(config),
+            station_names,
         }
     }
 }

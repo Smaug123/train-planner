@@ -1,10 +1,15 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use train_server::cache::{CacheConfig, CachedDarwinClient};
 use train_server::darwin::{DarwinClient, DarwinConfig};
 use train_server::planner::SearchConfig;
+use train_server::stations::{StationClient, StationClientConfig, StationNames};
 use train_server::walkable::london_connections;
 use train_server::web::{AppState, create_router};
+
+/// How often to refresh station names (24 hours).
+const STATION_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[tokio::main]
 async fn main() {
@@ -19,7 +24,7 @@ async fn main() {
     });
 
     // Create Darwin client
-    let darwin_config = DarwinConfig::new(username, password);
+    let darwin_config = DarwinConfig::new(&username, &password);
     let darwin_client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
 
     // Create cached client
@@ -32,8 +37,32 @@ async fn main() {
     // Create search config
     let search_config = SearchConfig::default();
 
+    // Fetch station names (fail fast if unavailable)
+    println!("Fetching station names...");
+    let station_config = StationClientConfig::new(&username, &password);
+    let station_client =
+        StationClient::new(station_config).expect("Failed to create Station client");
+    let station_names = StationNames::fetch(station_client)
+        .await
+        .expect("Failed to fetch station names");
+    println!("Loaded {} station names", station_names.len().await);
+
+    // Spawn background task to refresh station names daily
+    let station_names_refresh = station_names.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(STATION_REFRESH_INTERVAL);
+        interval.tick().await; // First tick is immediate, skip it
+        loop {
+            interval.tick().await;
+            match station_names_refresh.refresh().await {
+                Ok(count) => println!("Refreshed station names: {} stations", count),
+                Err(e) => eprintln!("Failed to refresh station names: {}", e),
+            }
+        }
+    });
+
     // Build app state
-    let state = AppState::new(cached_darwin, walkable, search_config);
+    let state = AppState::new(cached_darwin, walkable, search_config, station_names);
 
     // Create router
     let app = create_router(state);
