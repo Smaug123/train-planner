@@ -49,7 +49,9 @@ This is a Rust web application for planning train journey connections. The user 
 ## Environment Variables
 
 ```bash
-DARWIN_USERNAME=<username from Rail Data Marketplace>
-DARWIN_PASSWORD=<password from Rail Data Marketplace>
+DARWIN_API_KEY=<consumer key from Rail Data Marketplace for LDBWS product>
 LISTEN_ADDR=127.0.0.1:3000
+
+# Optional: for station name lookups (Rail Data Marketplace stations feed)
+STATION_API_KEY=<consumer key for stations knowledgebase product>
 ```

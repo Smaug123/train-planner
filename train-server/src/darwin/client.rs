@@ -5,10 +5,8 @@
 
 use std::sync::Arc;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::NaiveDate;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::Semaphore;
 
 use crate::domain::Crs;
@@ -27,10 +25,8 @@ const DEFAULT_MAX_CONCURRENT: usize = 5;
 /// Configuration for the Darwin client.
 #[derive(Debug, Clone)]
 pub struct DarwinConfig {
-    /// Username for HTTP Basic authentication
-    pub username: String,
-    /// Password for HTTP Basic authentication
-    pub password: String,
+    /// API key for x-apikey header authentication
+    pub api_key: String,
     /// Base URL for the API (defaults to production Darwin)
     pub base_url: String,
     /// Maximum concurrent requests
@@ -40,11 +36,10 @@ pub struct DarwinConfig {
 }
 
 impl DarwinConfig {
-    /// Create a new config with the given credentials.
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+    /// Create a new config with the given API key.
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            username: username.into(),
-            password: password.into(),
+            api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             timeout_secs: 30,
@@ -86,16 +81,13 @@ impl DarwinClient {
     pub fn new(config: DarwinConfig) -> Result<Self, DarwinError> {
         let mut headers = HeaderMap::new();
 
-        // Build HTTP Basic auth header: "Basic base64(username:password)"
-        let credentials = format!("{}:{}", config.username, config.password);
-        let encoded = BASE64.encode(credentials.as_bytes());
-        let auth_value = format!("Basic {}", encoded);
-        let auth_header =
-            HeaderValue::from_str(&auth_value).map_err(|_| DarwinError::ApiError {
+        // Use x-apikey header for Rail Data Marketplace authentication
+        let api_key_header =
+            HeaderValue::from_str(&config.api_key).map_err(|_| DarwinError::ApiError {
                 status: 0,
-                message: "Invalid credentials format".to_string(),
+                message: "Invalid API key format".to_string(),
             })?;
-        headers.insert(AUTHORIZATION, auth_header);
+        headers.insert(HeaderName::from_static("x-apikey"), api_key_header);
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
@@ -384,13 +376,12 @@ mod tests {
 
     #[test]
     fn config_builder() {
-        let config = DarwinConfig::new("test-user", "test-pass")
+        let config = DarwinConfig::new("test-api-key")
             .with_base_url("http://localhost:8080")
             .with_max_concurrent(10)
             .with_timeout(60);
 
-        assert_eq!(config.username, "test-user");
-        assert_eq!(config.password, "test-pass");
+        assert_eq!(config.api_key, "test-api-key");
         assert_eq!(config.base_url, "http://localhost:8080");
         assert_eq!(config.max_concurrent, 10);
         assert_eq!(config.timeout_secs, 60);
@@ -398,10 +389,9 @@ mod tests {
 
     #[test]
     fn config_defaults() {
-        let config = DarwinConfig::new("test-user", "test-pass");
+        let config = DarwinConfig::new("test-api-key");
 
-        assert_eq!(config.username, "test-user");
-        assert_eq!(config.password, "test-pass");
+        assert_eq!(config.api_key, "test-api-key");
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.max_concurrent, DEFAULT_MAX_CONCURRENT);
         assert_eq!(config.timeout_secs, 30);
@@ -409,7 +399,7 @@ mod tests {
 
     #[test]
     fn client_creation() {
-        let config = DarwinConfig::new("test-user", "test-pass");
+        let config = DarwinConfig::new("test-api-key");
         let client = DarwinClient::new(config);
         assert!(client.is_ok());
     }

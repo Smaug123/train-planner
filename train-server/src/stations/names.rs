@@ -6,16 +6,19 @@ use tokio::sync::RwLock;
 
 use crate::domain::Crs;
 
+use super::cache::StationCache;
 use super::client::{StationClient, StationDto};
 use super::error::StationError;
 
 /// Thread-safe station name lookup.
 ///
-/// Provides CRS → station name mapping with support for background refresh.
+/// Provides CRS → station name mapping with support for background refresh
+/// and optional disk caching.
 #[derive(Clone)]
 pub struct StationNames {
     inner: Arc<RwLock<HashMap<Crs, String>>>,
     client: StationClient,
+    cache: Option<StationCache>,
 }
 
 impl StationNames {
@@ -29,7 +32,51 @@ impl StationNames {
         Ok(Self {
             inner: Arc::new(RwLock::new(map)),
             client,
+            cache: None,
         })
+    }
+
+    /// Create a new StationNames, loading from disk cache if valid,
+    /// otherwise fetching from the API and saving to cache.
+    ///
+    /// Returns the StationNames and a boolean indicating whether data was
+    /// loaded from cache (true) or fetched from API (false).
+    ///
+    /// This is useful for avoiding expensive API calls on server restart.
+    pub async fn fetch_with_cache(
+        client: StationClient,
+        cache: StationCache,
+    ) -> Result<(Self, bool), StationError> {
+        // Try loading from cache first
+        if let Some(stations) = cache.load() {
+            let map = build_map(stations);
+            return Ok((
+                Self {
+                    inner: Arc::new(RwLock::new(map)),
+                    client,
+                    cache: Some(cache),
+                },
+                true, // loaded from cache
+            ));
+        }
+
+        // Cache miss or expired: fetch from API
+        let stations = client.fetch_all().await?;
+
+        // Save to cache (log but don't fail on cache write errors)
+        if let Err(e) = cache.save(&stations) {
+            eprintln!("Warning: failed to save station cache: {}", e);
+        }
+
+        let map = build_map(stations);
+        Ok((
+            Self {
+                inner: Arc::new(RwLock::new(map)),
+                client,
+                cache: Some(cache),
+            },
+            false, // fetched from API
+        ))
     }
 
     /// Create an empty StationNames (for mock/test mode).
@@ -39,6 +86,7 @@ impl StationNames {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             client,
+            cache: None,
         }
     }
 
@@ -62,10 +110,18 @@ impl StationNames {
 
     /// Refresh the station data from the API.
     ///
-    /// On success, replaces the current mapping. On failure, the existing
-    /// mapping is preserved and the error is returned.
+    /// On success, replaces the current mapping and updates the cache.
+    /// On failure, the existing mapping is preserved and the error is returned.
     pub async fn refresh(&self) -> Result<usize, StationError> {
         let stations = self.client.fetch_all().await?;
+
+        // Update cache if configured (log but don't fail on cache write errors)
+        if let Some(cache) = &self.cache
+            && let Err(e) = cache.save(&stations)
+        {
+            eprintln!("Warning: failed to save station cache: {}", e);
+        }
+
         let map = build_map(stations);
         let count = map.len();
 
@@ -73,6 +129,11 @@ impl StationNames {
         *guard = map;
 
         Ok(count)
+    }
+
+    /// Returns whether this instance is using disk caching.
+    pub fn has_cache(&self) -> bool {
+        self.cache.is_some()
     }
 }
 

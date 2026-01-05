@@ -19,3 +19,4 @@ tower-http = { version = "0.5", features = ["fs"] }
 
 [dev-dependencies]
 proptest = "1"
+tempfile = "3"

@@ -4,7 +4,9 @@ use std::time::Duration;
 use train_server::cache::{CacheConfig, CachedDarwinClient};
 use train_server::darwin::{DarwinClient, DarwinClientImpl, DarwinConfig, MockDarwinClient};
 use train_server::planner::SearchConfig;
-use train_server::stations::{StationClient, StationClientConfig, StationNames};
+use train_server::stations::{
+    StationCache, StationCacheConfig, StationClient, StationClientConfig, StationNames,
+};
 use train_server::walkable::london_connections;
 use train_server::web::{AppState, create_router};
 
@@ -35,20 +37,14 @@ async fn main() {
         DarwinClientImpl::Mock(mock)
     } else {
         println!("Using REAL Darwin client");
-        let username = std::env::var("DARWIN_USERNAME").unwrap_or_else(|_| {
+        let api_key = std::env::var("DARWIN_API_KEY").unwrap_or_else(|_| {
             eprintln!(
-                "Error: DARWIN_USERNAME not set. Set USE_MOCK_DARWIN=true to use mock data instead."
-            );
-            std::process::exit(1);
-        });
-        let password = std::env::var("DARWIN_PASSWORD").unwrap_or_else(|_| {
-            eprintln!(
-                "Error: DARWIN_PASSWORD not set. Set USE_MOCK_DARWIN=true to use mock data instead."
+                "Error: DARWIN_API_KEY not set. Set USE_MOCK_DARWIN=true to use mock data instead."
             );
             std::process::exit(1);
         });
 
-        let darwin_config = DarwinConfig::new(&username, &password);
+        let darwin_config = DarwinConfig::new(&api_key);
         let client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
         DarwinClientImpl::Real(client)
     };
@@ -63,28 +59,46 @@ async fn main() {
     // Create search config
     let search_config = SearchConfig::default();
 
-    // Fetch station names (skip if using mock data - not essential)
+    // Fetch station names (requires separate Rail Data Marketplace subscription)
+    // Uses disk cache to avoid hitting the expensive API on every restart
     let station_names = if use_mock {
         println!("Using mock mode: skipping station names API fetch");
-        // Create an empty station names for mock mode (not needed for basic testing)
-        let station_config = StationClientConfig::new("", "");
+        let station_config = StationClientConfig::new("");
         let station_client =
             StationClient::new(station_config).expect("Failed to create Station client");
         StationNames::empty(station_client)
-    } else {
-        println!("Fetching station names from API...");
-        // Get credentials again (they're checked above so safe to unwrap)
-        let username = std::env::var("DARWIN_USERNAME").unwrap();
-        let password = std::env::var("DARWIN_PASSWORD").unwrap();
-
-        let station_config = StationClientConfig::new(&username, &password);
+    } else if let Ok(api_key) = std::env::var("STATION_API_KEY") {
+        let station_config = StationClientConfig::new(&api_key);
         let station_client =
             StationClient::new(station_config).expect("Failed to create Station client");
-        let names = StationNames::fetch(station_client)
+
+        // Configure disk cache (default: stations_cache.json, 24h TTL)
+        let cache_path = std::env::var("STATION_CACHE_PATH")
+            .unwrap_or_else(|_| "stations_cache.json".to_string());
+        let cache_config = StationCacheConfig::new(&cache_path);
+        let cache = StationCache::new(cache_config);
+
+        println!("Loading station names (cache: {})...", cache_path);
+        let (names, from_cache) = StationNames::fetch_with_cache(station_client, cache)
             .await
             .expect("Failed to fetch station names");
-        println!("Loaded {} station names", names.len().await);
+
+        let count = names.len().await;
+        if from_cache {
+            println!("Loaded {} station names from cache", count);
+        } else {
+            println!(
+                "Fetched {} station names from API (cached for next restart)",
+                count
+            );
+        }
         names
+    } else {
+        println!("STATION_API_KEY not set, using empty station names");
+        let station_config = StationClientConfig::new("");
+        let station_client =
+            StationClient::new(station_config).expect("Failed to create Station client");
+        StationNames::empty(station_client)
     };
 
     // Spawn background task to refresh station names daily

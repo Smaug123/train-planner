@@ -1,17 +1,21 @@
 //! National Rail Station API client.
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 
 use super::error::StationError;
 
-/// Default base URL for the Station API.
-const DEFAULT_BASE_URL: &str = "https://internal.nationalrail.co.uk/json/1.0";
+/// Default base URL for the Station API (Rail Data Marketplace).
+const DEFAULT_BASE_URL: &str = "https://api1.raildata.org.uk/1010-nationalrail-knowledgebase-stations-feed-_json_---production5_0";
+
+/// Wrapper for the stations response.
+#[derive(Debug, Deserialize)]
+pub struct StationsResponse {
+    pub stations: Vec<StationDto>,
+}
 
 /// Minimal DTO for station data - we only need CRS and name.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StationDto {
     pub crs_code: String,
@@ -21,10 +25,8 @@ pub struct StationDto {
 /// Configuration for the Station API client.
 #[derive(Debug, Clone)]
 pub struct StationClientConfig {
-    /// Username for HTTP Basic authentication
-    pub username: String,
-    /// Password for HTTP Basic authentication
-    pub password: String,
+    /// API key for x-apikey header authentication
+    pub api_key: String,
     /// Base URL for the API
     pub base_url: String,
     /// Request timeout in seconds
@@ -32,11 +34,10 @@ pub struct StationClientConfig {
 }
 
 impl StationClientConfig {
-    /// Create a new config with the given credentials.
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+    /// Create a new config with the given API key.
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            username: username.into(),
-            password: password.into(),
+            api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
             timeout_secs: 30,
         }
@@ -61,15 +62,13 @@ impl StationClient {
     pub fn new(config: StationClientConfig) -> Result<Self, StationError> {
         let mut headers = HeaderMap::new();
 
-        // Build HTTP Basic auth header
-        let credentials = format!("{}:{}", config.username, config.password);
-        let encoded = BASE64.encode(credentials.as_bytes());
-        let auth_value = format!("Basic {}", encoded);
-        let auth_header = HeaderValue::from_str(&auth_value).map_err(|_| StationError::Api {
-            status: 0,
-            message: "Invalid credentials format".to_string(),
-        })?;
-        headers.insert(AUTHORIZATION, auth_header);
+        // Use x-apikey header for Rail Data Marketplace authentication
+        let api_key_header =
+            HeaderValue::from_str(&config.api_key).map_err(|_| StationError::Api {
+                status: 0,
+                message: "Invalid API key format".to_string(),
+            })?;
+        headers.insert(HeaderName::from_static("x-apikey"), api_key_header);
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
@@ -103,9 +102,12 @@ impl StationClient {
 
         let body = response.text().await?;
 
-        serde_json::from_str(&body).map_err(|e| StationError::Json {
-            message: e.to_string(),
-        })
+        let response: StationsResponse =
+            serde_json::from_str(&body).map_err(|e| StationError::Json {
+                message: e.to_string(),
+            })?;
+
+        Ok(response.stations)
     }
 }
 
@@ -115,7 +117,7 @@ mod tests {
 
     #[test]
     fn config_defaults() {
-        let config = StationClientConfig::new("user", "pass");
+        let config = StationClientConfig::new("test-api-key");
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.timeout_secs, 30);
     }
@@ -123,7 +125,7 @@ mod tests {
     #[test]
     fn config_with_base_url() {
         let config =
-            StationClientConfig::new("user", "pass").with_base_url("http://localhost:8080");
+            StationClientConfig::new("test-api-key").with_base_url("http://localhost:8080");
         assert_eq!(config.base_url, "http://localhost:8080");
     }
 }

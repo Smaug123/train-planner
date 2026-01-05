@@ -18,4 +18,8 @@ pub enum StationError {
     /// Failed to parse response JSON
     #[error("JSON parse error: {message}")]
     Json { message: String },
+
+    /// Cache operation failed
+    #[error("cache error: {message}")]
+    Cache { message: String },
 }
