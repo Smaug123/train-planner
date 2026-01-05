@@ -17,7 +17,7 @@ use super::types::{ServiceDetails, StationBoardWithDetails};
 
 /// Default base URL for Darwin LDB API.
 const DEFAULT_BASE_URL: &str =
-    "https://api1.raildata.org.uk/1010-live-departure-board-dep-with-details/LDBWS";
+    "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS";
 
 /// Default maximum concurrent requests.
 const DEFAULT_MAX_CONCURRENT: usize = 5;
@@ -160,6 +160,7 @@ impl DarwinClient {
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            eprintln!("[Darwin] {status} from {url}");
             return Err(DarwinError::ApiError {
                 status: status.as_u16(),
                 message: body,

@@ -418,11 +418,14 @@ impl From<SearchError> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message) = match self {
-            AppError::BadRequest { message } => (StatusCode::BAD_REQUEST, message),
-            AppError::NotFound { message } => (StatusCode::NOT_FOUND, message),
-            AppError::Internal { message } => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        let (status, message) = match &self {
+            AppError::BadRequest { message } => (StatusCode::BAD_REQUEST, message.clone()),
+            AppError::NotFound { message } => (StatusCode::NOT_FOUND, message.clone()),
+            AppError::Internal { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
         };
+
+        // Log errors to stderr for debugging
+        eprintln!("[{status}] {message}");
 
         let body = Json(ErrorResponse { error: message });
         (status, body).into_response()
