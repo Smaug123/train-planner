@@ -17,79 +17,82 @@
 </div>
 
 <div class="search-panel">
-    <h2>Already on a Train?</h2>
+    <div class="mode-toggle">
+        <button type="button" class="mode-toggle-btn active" data-mode="identify">Already on a Train?</button>
+        <button type="button" class="mode-toggle-btn" data-mode="search">Search by Departure</button>
+    </div>
 
-    <form id="identify-form" action="/identify" method="GET">
-        <div class="form-row">
+    <div id="identify-mode" class="search-mode active">
+        <form id="identify-form" action="/identify" method="GET">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="next_station">Next Stop</label>
+                    <input type="text" id="next_station" name="next_station"
+                           placeholder="e.g. WDB"
+                           required
+                           maxlength="3"
+                           autocomplete="off">
+                    <p class="hint">The next station your train will call at</p>
+                </div>
+
+                <div class="form-group">
+                    <label for="terminus">Terminates At (Optional)</label>
+                    <input type="text" id="terminus" name="terminus"
+                           placeholder="e.g. IPS"
+                           maxlength="3"
+                           autocomplete="off">
+                    <p class="hint">Where your train terminates</p>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">
+                Identify My Train
+            </button>
+        </form>
+    </div>
+
+    <div id="search-mode" class="search-mode">
+        <form id="search-form" action="/search/service" method="GET">
             <div class="form-group">
-                <label for="next_station">Next Stop</label>
-                <input type="text" id="next_station" name="next_station"
-                       placeholder="e.g. WDB"
+                <label for="origin">Departed From</label>
+                <input type="text" id="origin" name="origin"
+                       placeholder="e.g. PAD or London Paddington"
                        required
-                       maxlength="3"
                        autocomplete="off">
-                <p class="hint">The next station your train will call at</p>
+                <p class="hint">Enter a station code (3 letters) or name</p>
             </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="headcode">Headcode (Optional)</label>
+                    <input type="text" id="headcode" name="headcode"
+                           placeholder="e.g. 1A23"
+                           pattern="[0-9][A-Za-z][0-9]{2}"
+                           maxlength="4"
+                           autocomplete="off">
+                </div>
+
+                <div class="form-group">
+                    <label for="dep_time">Departure Time</label>
+                    <input type="time" id="dep_time" name="time">
+                </div>
+            </div>
+
+            <p class="hint">Provide headcode or departure time to narrow down results. If both are given, headcode takes priority.</p>
 
             <div class="form-group">
-                <label for="terminus">Terminates At (Optional)</label>
-                <input type="text" id="terminus" name="terminus"
-                       placeholder="e.g. IPS"
-                       maxlength="3"
+                <label for="destination">Final Destination (Optional)</label>
+                <input type="text" id="destination" name="destination"
+                       placeholder="e.g. BRI or Bristol Temple Meads"
                        autocomplete="off">
-                <p class="hint">Where your train terminates</p>
-            </div>
-        </div>
-
-        <button type="submit" class="btn btn-primary btn-block">
-            Identify My Train
-        </button>
-    </form>
-</div>
-
-<div class="search-panel">
-    <h2>Search by Departure Station</h2>
-
-    <form id="search-form" action="/search/service" method="GET">
-        <div class="form-group">
-            <label for="origin">Departed From</label>
-            <input type="text" id="origin" name="origin"
-                   placeholder="e.g. PAD or London Paddington"
-                   required
-                   autocomplete="off">
-            <p class="hint">Enter a station code (3 letters) or name</p>
-        </div>
-
-        <div class="form-row">
-            <div class="form-group">
-                <label for="headcode">Headcode (Optional)</label>
-                <input type="text" id="headcode" name="headcode"
-                       placeholder="e.g. 1A23"
-                       pattern="[0-9][A-Za-z][0-9]{2}"
-                       maxlength="4"
-                       autocomplete="off">
+                <p class="hint">Enter your final destination to filter services</p>
             </div>
 
-            <div class="form-group">
-                <label for="dep_time">Departure Time</label>
-                <input type="time" id="dep_time" name="time">
-            </div>
-        </div>
-
-        <p class="hint">Provide headcode or departure time to narrow down results. If both are given, headcode takes priority.</p>
-
-        <div class="form-group">
-            <label for="destination">Final Destination (Optional)</label>
-            <input type="text" id="destination" name="destination"
-                   placeholder="e.g. BRI or Bristol Temple Meads"
-                   autocomplete="off">
-            <p class="hint">Enter your final destination to filter services</p>
-        </div>
-
-        <button type="submit" class="btn btn-primary btn-block">
-            Find Service
-        </button>
-    </form>
+            <button type="submit" class="btn btn-primary btn-block">
+                Find Service
+            </button>
+        </form>
+    </div>
 </div>
 
 <div id="results-container">
@@ -105,6 +108,30 @@
     const searchForm = document.getElementById('search-form');
     const identifyForm = document.getElementById('identify-form');
     const resultsContainer = document.getElementById('results-container');
+
+    // Mode toggle handling
+    const modeToggleBtns = document.querySelectorAll('.mode-toggle-btn');
+    const identifyMode = document.getElementById('identify-mode');
+    const searchMode = document.getElementById('search-mode');
+
+    modeToggleBtns.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            const mode = btn.dataset.mode;
+
+            // Update button states
+            modeToggleBtns.forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+
+            // Show/hide modes
+            if (mode === 'identify') {
+                identifyMode.classList.add('active');
+                searchMode.classList.remove('active');
+            } else {
+                searchMode.classList.add('active');
+                identifyMode.classList.remove('active');
+            }
+        });
+    });
 
     // Generic form submission handler
     function submitForm(form, endpoint, loadingMessage) {

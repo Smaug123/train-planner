@@ -280,6 +280,57 @@ a:hover {
     border-bottom: 2px solid var(--cream-dark);
 }
 
+/* Mode Toggle (Tab-style selector) */
+.mode-toggle {
+    display: flex;
+    margin-bottom: 1.5rem;
+    border-bottom: 2px solid var(--cream-dark);
+}
+
+.mode-toggle-btn {
+    flex: 1;
+    padding: 0.875rem 1rem;
+    font-family: var(--font-display);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: none;
+    background: var(--cream);
+    color: var(--warm-grey);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.mode-toggle-btn:hover {
+    color: var(--forest-green);
+    background: var(--cream-dark);
+}
+
+.mode-toggle-btn.active {
+    color: var(--forest-green);
+    background: white;
+}
+
+.mode-toggle-btn.active::after {
+    content: "";
+    position: absolute;
+    bottom: -2px;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--forest-green);
+}
+
+.search-mode {
+    display: none;
+}
+
+.search-mode.active {
+    display: block;
+}
+
 .form-group {
     margin-bottom: 1.5rem;
 }
