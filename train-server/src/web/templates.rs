@@ -330,6 +330,48 @@ pub struct TrainMatchView {
     pub rtt_url: String,
     /// Whether this is an exact match (both next station and terminus)
     pub is_exact: bool,
+    /// Name of the next station (where user will arrive)
+    pub next_station_name: String,
+    /// Scheduled arrival time at next station
+    pub scheduled_arrival: String,
+    /// Expected arrival time at next station (if different from scheduled)
+    pub expected_arrival: Option<String>,
+    /// Name of the terminus station
+    pub terminus_name: String,
+    /// Scheduled arrival time at terminus
+    pub scheduled_terminus_arrival: String,
+    /// Expected arrival time at terminus (if different from scheduled)
+    pub expected_terminus_arrival: Option<String>,
+}
+
+impl TrainMatchView {
+    /// The arrival time to display (expected if available, else scheduled).
+    pub fn display_arrival(&self) -> &str {
+        self.expected_arrival
+            .as_deref()
+            .unwrap_or(&self.scheduled_arrival)
+    }
+
+    /// Whether arrival is delayed.
+    pub fn is_arrival_delayed(&self) -> bool {
+        self.expected_arrival
+            .as_ref()
+            .is_some_and(|exp| exp != &self.scheduled_arrival)
+    }
+
+    /// The terminus arrival time to display (expected if available, else scheduled).
+    pub fn display_terminus_arrival(&self) -> &str {
+        self.expected_terminus_arrival
+            .as_deref()
+            .unwrap_or(&self.scheduled_terminus_arrival)
+    }
+
+    /// Whether terminus arrival is delayed.
+    pub fn is_terminus_delayed(&self) -> bool {
+        self.expected_terminus_arrival
+            .as_ref()
+            .is_some_and(|exp| exp != &self.scheduled_terminus_arrival)
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 
 <div class="search-context">
     <p>
-        Trains departing from <strong>{{ next_station }}</strong>
+        Trains arriving at <strong>{{ next_station }}</strong>
         {% if let Some(term) = terminus %}
         terminating at <strong>{{ term }}</strong>
         {% endif %}
@@ -47,10 +47,10 @@
     <article class="service-card{% if m.service.is_cancelled %} cancelled{% endif %}{% if m.is_exact %} exact-match{% endif %}">
         <header class="service-header">
             <div class="service-identity">
-                <span class="service-time{% if m.service.is_delayed() %} delayed{% endif %}">
-                    {{ m.service.display_time() }}
-                    {% if m.service.is_delayed() %}
-                    <span class="original">{{ m.service.scheduled_departure }}</span>
+                <span class="service-time{% if m.is_arrival_delayed() %} delayed{% endif %}">
+                    {{ m.display_arrival() }}
+                    {% if m.is_arrival_delayed() %}
+                    <span class="original">{{ m.scheduled_arrival }}</span>
                     {% endif %}
                 </span>
                 {% if let Some(headcode) = m.service.headcode %}
@@ -59,8 +59,16 @@
             </div>
 
             <div class="service-destination">
-                <h3>{{ m.service.destination }}</h3>
-                <span class="service-operator">{{ m.service.operator }}</span>
+                <h3>{{ m.next_station_name }}</h3>
+                <span class="service-terminus">
+                    arr. {{ m.terminus_name }}
+                    <span class="terminus-time{% if m.is_terminus_delayed() %} delayed{% endif %}">
+                        {{ m.display_terminus_arrival() }}
+                        {% if m.is_terminus_delayed() %}
+                        <span class="original">({{ m.scheduled_terminus_arrival }})</span>
+                        {% endif %}
+                    </span>
+                </span>
             </div>
 
             {% if let Some(platform) = m.service.platform %}
@@ -74,7 +82,7 @@
         <div class="service-status-row">
             {% if m.service.is_cancelled %}
             <span class="service-status cancelled">Cancelled</span>
-            {% else if m.service.is_delayed() %}
+            {% else if m.is_arrival_delayed() %}
             <span class="service-status delayed">Delayed</span>
             {% else %}
             <span class="service-status on-time">On Time</span>

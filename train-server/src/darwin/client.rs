@@ -21,8 +21,7 @@ const DEFAULT_DEPARTURES_URL: &str =
 
 /// Default base URL for Darwin LDB arrivals API.
 /// This is a separate product on Rail Data Marketplace.
-const DEFAULT_ARRIVALS_URL: &str =
-    "https://api1.raildata.org.uk/1010-live-arrival-board-arr/LDBWS";
+const DEFAULT_ARRIVALS_URL: &str = "https://api1.raildata.org.uk/1010-live-arrival-board-arr/LDBWS";
 
 /// Default maximum concurrent requests.
 const DEFAULT_MAX_CONCURRENT: usize = 5;

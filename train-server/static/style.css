@@ -487,6 +487,28 @@ input[type="text"]::placeholder {
     color: var(--warm-grey);
 }
 
+.service-terminus {
+    display: block;
+    font-size: 0.875rem;
+    color: var(--warm-grey);
+}
+
+.terminus-time {
+    font-weight: 600;
+    color: var(--dark);
+}
+
+.terminus-time.delayed {
+    color: var(--delay-red);
+}
+
+.terminus-time .original {
+    font-weight: 400;
+    font-size: 0.8em;
+    color: var(--warm-grey);
+    text-decoration: line-through;
+}
+
 .service-platform {
     text-align: right;
 }

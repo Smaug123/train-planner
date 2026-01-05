@@ -220,10 +220,71 @@ async fn identify_train(
                     .candidate
                     .expected_departure
                     .unwrap_or(m.service.candidate.scheduled_departure);
+
+                // Get arrival info at the board station (next station)
+                let board_call = m
+                    .service
+                    .service
+                    .calls
+                    .get(m.service.service.board_station_idx.0);
+
+                let next_station_name = board_call
+                    .map(|c| c.station_name.clone())
+                    .unwrap_or_else(|| next_station.as_str().to_string());
+
+                // For the board station, prefer arrival times but fall back to departure
+                // times. Departures boards often don't include arrival times (sta/eta),
+                // only departure times (std/etd), so we need this fallback to correctly
+                // show delay status.
+                let scheduled_arrival = board_call
+                    .and_then(|c| c.booked_arrival.or(c.booked_departure))
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+
+                let expected_arrival = board_call.and_then(|c| {
+                    let exp = c.expected_arrival().or(c.expected_departure())?;
+                    let sched = c.booked_arrival.or(c.booked_departure)?;
+                    // Only show expected if different from scheduled
+                    if exp != sched {
+                        Some(exp.to_string())
+                    } else {
+                        None
+                    }
+                });
+
+                // Get terminus (last call) arrival info
+                let terminus_call = m.service.service.calls.last();
+
+                let terminus_name = terminus_call
+                    .map(|c| c.station_name.clone())
+                    .unwrap_or_default();
+
+                let scheduled_terminus_arrival = terminus_call
+                    .and_then(|c| c.booked_arrival)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+
+                let expected_terminus_arrival = terminus_call.and_then(|c| {
+                    let exp = c.expected_arrival()?;
+                    let sched = c.booked_arrival?;
+                    // Only show expected if different from scheduled
+                    if exp != sched {
+                        Some(exp.to_string())
+                    } else {
+                        None
+                    }
+                });
+
                 TrainMatchView {
                     service: ServiceView::from_service(&m.service.service),
                     rtt_url: rtt_search_url_default(&next_station, date, dep_time),
                     is_exact: m.confidence == MatchConfidence::Exact,
+                    next_station_name,
+                    scheduled_arrival,
+                    expected_arrival,
+                    terminus_name,
+                    scheduled_terminus_arrival,
+                    expected_terminus_arrival,
                 }
             })
             .collect();

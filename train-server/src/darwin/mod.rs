@@ -87,24 +87,12 @@ impl DarwinClientImpl {
         match self {
             Self::Real(client) => {
                 client
-                    .get_arrivals_with_details(
-                        crs,
-                        num_rows,
-                        time_offset,
-                        time_window,
-                        board_date,
-                    )
+                    .get_arrivals_with_details(crs, num_rows, time_offset, time_window, board_date)
                     .await
             }
             Self::Mock(client) => {
                 client
-                    .get_arrivals_with_details(
-                        crs,
-                        num_rows,
-                        time_offset,
-                        time_window,
-                        board_date,
-                    )
+                    .get_arrivals_with_details(crs, num_rows, time_offset, time_window, board_date)
                     .await
             }
         }
