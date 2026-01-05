@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use askama::Template;
+use axum::body::Bytes;
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -29,7 +30,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/search/service", get(search_service))
         .route("/identify", get(identify_train))
         .route("/journey/plan", post(plan_journey))
-        .nest_service("/static", ServeDir::new("static"))
+        .nest_service(
+            "/static",
+            ServeDir::new("train-server/static").fallback(ServeDir::new("static")),
+        )
         .with_state(state)
 }
 
@@ -181,6 +185,18 @@ async fn identify_train(
             ),
         })?;
 
+    // Check if next station is the terminus - this means the train is arriving,
+    // not departing, so it won't appear on the departure board
+    if terminus.as_ref() == Some(&next_station) {
+        return Err(AppError::BadRequest {
+            message: format!(
+                "Next station ({}) is the same as terminus - the train is arriving at its final destination. \
+                 Try entering the previous station as 'next station', or omit the terminus.",
+                next_station.as_str()
+            ),
+        });
+    }
+
     // Get current time info
     let now = Local::now();
     let date = now.date_naive();
@@ -240,11 +256,24 @@ async fn identify_train(
 async fn plan_journey(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<PlanJourneyRequest>,
+    body: Bytes,
 ) -> Result<Response, AppError> {
+    // Parse JSON manually so we can log the body on failure
+    let req: PlanJourneyRequest = serde_json::from_slice(&body).map_err(|e| {
+        eprintln!("[JSON parse error] {e}");
+        eprintln!("[Body] {}", String::from_utf8_lossy(&body));
+        AppError::BadRequest {
+            message: format!("Invalid JSON: {e}"),
+        }
+    })?;
     // Parse destination CRS
     let dest_crs = Crs::parse(&req.destination).map_err(|_| AppError::BadRequest {
         message: format!("Invalid destination CRS: {}", req.destination),
+    })?;
+
+    // Parse board station CRS
+    let board_station = Crs::parse(&req.board_station).map_err(|_| AppError::BadRequest {
+        message: format!("Invalid board station CRS: {}", req.board_station),
     })?;
 
     // Get current time info
@@ -252,14 +281,8 @@ async fn plan_journey(
     let date = now.date_naive();
     let current_mins = (now.time().hour() * 60 + now.time().minute()) as u16;
 
-    // We need to find the service from the cache
-    // This is a limitation - the service_id is ephemeral and we need to search for it
-    // In practice, this would be called immediately after search_service
-    // so the service should still be in cache
-
-    // For now, search all cached stations for the service ID
-    // This is inefficient but works for the MVP
-    let service = find_service_by_id(&state, &req.service_id, date, current_mins)
+    // Find the service from the board station's departure board
+    let service = find_service_by_id(&state, &req.service_id, &board_station, date, current_mins)
         .await
         .ok_or_else(|| AppError::NotFound {
             message: format!("Service {} not found or expired", req.service_id),
@@ -312,20 +335,39 @@ async fn plan_journey(
 }
 
 /// Find a service by its Darwin ID.
+///
+/// Searches the board_station first (where the service was originally found),
+/// then falls back to common stations if not found.
 async fn find_service_by_id(
     state: &AppState,
     service_id: &str,
+    board_station: &Crs,
     date: NaiveDate,
     current_mins: u16,
 ) -> Option<Arc<Service>> {
-    // Get cached boards - we try a few common stations
-    // This is a hack - in production we'd track which station the service came from
+    // Search the board station first - this is where the service was found
+    if let Ok(services) = state
+        .darwin
+        .get_departures_with_details(board_station, date, current_mins, 0, 120)
+        .await
+    {
+        for s in services.iter() {
+            if s.service.service_ref.darwin_id == service_id {
+                return Some(Arc::new(s.service.clone()));
+            }
+        }
+    }
+
+    // Fallback: try common stations (in case board_station cache expired)
     let common_stations = ["PAD", "EUS", "KGX", "VIC", "WAT", "LIV", "BHM", "MAN"];
 
     for station in &common_stations {
         let Ok(crs) = Crs::parse(station) else {
             continue;
         };
+        if &crs == board_station {
+            continue; // Already searched
+        }
         let Ok(services) = state
             .darwin
             .get_departures_with_details(&crs, date, current_mins, 0, 120)

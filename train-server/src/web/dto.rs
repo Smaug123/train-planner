@@ -110,6 +110,9 @@ pub struct PlanJourneyRequest {
 
     /// Destination station CRS code
     pub destination: String,
+
+    /// Station where the service was found (board station from identification)
+    pub board_station: String,
 }
 
 /// A journey option.

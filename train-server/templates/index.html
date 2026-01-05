@@ -181,6 +181,7 @@
             const btn = e.target;
             const serviceId = btn.dataset.serviceId;
             const positionIdx = btn.dataset.positionIdx;
+            const boardStation = btn.dataset.boardStation;
 
             // Show destination prompt
             const destination = prompt('Enter your final destination (station code or name):');
@@ -204,7 +205,8 @@
                 body: JSON.stringify({
                     service_id: serviceId,
                     position: parseInt(positionIdx),
-                    destination: destination.trim()
+                    destination: destination.trim(),
+                    board_station: boardStation
                 })
             })
             .then(function(response) {
