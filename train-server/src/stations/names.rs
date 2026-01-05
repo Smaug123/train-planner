@@ -32,6 +32,16 @@ impl StationNames {
         })
     }
 
+    /// Create an empty StationNames (for mock/test mode).
+    ///
+    /// This is useful when station name lookup is not needed.
+    pub fn empty(client: StationClient) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            client,
+        }
+    }
+
     /// Look up a station name by CRS code.
     pub async fn get(&self, crs: &Crs) -> Option<String> {
         let guard = self.inner.read().await;

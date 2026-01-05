@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use moka::future::Cache as MokaCache;
 
-use crate::darwin::{ConvertedService, DarwinClient, DarwinError};
+use crate::darwin::{ConvertedService, DarwinClientImpl, DarwinError};
 use crate::domain::Crs;
 
 /// Cache key for departure boards: (station CRS, date, time bucket, time window).
@@ -100,15 +100,15 @@ impl DarwinCache {
 
 /// Darwin client with caching.
 ///
-/// Wraps a `DarwinClient` and caches departure board responses.
+/// Wraps a `DarwinClientImpl` (real or mock) and caches departure board responses.
 pub struct CachedDarwinClient {
-    client: DarwinClient,
+    client: DarwinClientImpl,
     cache: DarwinCache,
 }
 
 impl CachedDarwinClient {
     /// Create a new cached client.
-    pub fn new(client: DarwinClient, cache_config: &CacheConfig) -> Self {
+    pub fn new(client: DarwinClientImpl, cache_config: &CacheConfig) -> Self {
         Self {
             client,
             cache: DarwinCache::new(cache_config),
@@ -181,7 +181,7 @@ impl CachedDarwinClient {
     }
 
     /// Access the underlying client for operations that bypass cache.
-    pub fn client(&self) -> &DarwinClient {
+    pub fn client(&self) -> &DarwinClientImpl {
         &self.client
     }
 

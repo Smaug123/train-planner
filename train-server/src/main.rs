@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use train_server::cache::{CacheConfig, CachedDarwinClient};
-use train_server::darwin::{DarwinClient, DarwinConfig};
+use train_server::darwin::{DarwinClient, DarwinClientImpl, DarwinConfig, MockDarwinClient};
 use train_server::planner::SearchConfig;
 use train_server::stations::{StationClient, StationClientConfig, StationNames};
 use train_server::walkable::london_connections;
@@ -13,19 +13,45 @@ const STATION_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[tokio::main]
 async fn main() {
-    // Get credentials from environment
-    let username = std::env::var("DARWIN_USERNAME").unwrap_or_else(|_| {
-        eprintln!("Warning: DARWIN_USERNAME not set. API calls will fail.");
-        String::new()
-    });
-    let password = std::env::var("DARWIN_PASSWORD").unwrap_or_else(|_| {
-        eprintln!("Warning: DARWIN_PASSWORD not set. API calls will fail.");
-        String::new()
-    });
+    // Check if we should use mock data
+    let use_mock = std::env::var("USE_MOCK_DARWIN")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
 
-    // Create Darwin client
-    let darwin_config = DarwinConfig::new(&username, &password);
-    let darwin_client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
+    // Create Darwin client (real or mock)
+    let darwin_client = if use_mock {
+        println!("Using MOCK Darwin client (loading from data/mock_boards/)");
+        let mock =
+            MockDarwinClient::new("data/mock_boards").expect("Failed to load mock Darwin data");
+        println!(
+            "Available mock stations: {:?}",
+            mock.available_stations()
+                .await
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+        );
+        DarwinClientImpl::Mock(mock)
+    } else {
+        println!("Using REAL Darwin client");
+        let username = std::env::var("DARWIN_USERNAME").unwrap_or_else(|_| {
+            eprintln!(
+                "Error: DARWIN_USERNAME not set. Set USE_MOCK_DARWIN=true to use mock data instead."
+            );
+            std::process::exit(1);
+        });
+        let password = std::env::var("DARWIN_PASSWORD").unwrap_or_else(|_| {
+            eprintln!(
+                "Error: DARWIN_PASSWORD not set. Set USE_MOCK_DARWIN=true to use mock data instead."
+            );
+            std::process::exit(1);
+        });
+
+        let darwin_config = DarwinConfig::new(&username, &password);
+        let client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
+        DarwinClientImpl::Real(client)
+    };
 
     // Create cached client
     let cache_config = CacheConfig::default();
@@ -37,15 +63,29 @@ async fn main() {
     // Create search config
     let search_config = SearchConfig::default();
 
-    // Fetch station names (fail fast if unavailable)
-    println!("Fetching station names...");
-    let station_config = StationClientConfig::new(&username, &password);
-    let station_client =
-        StationClient::new(station_config).expect("Failed to create Station client");
-    let station_names = StationNames::fetch(station_client)
-        .await
-        .expect("Failed to fetch station names");
-    println!("Loaded {} station names", station_names.len().await);
+    // Fetch station names (skip if using mock data - not essential)
+    let station_names = if use_mock {
+        println!("Using mock mode: skipping station names API fetch");
+        // Create an empty station names for mock mode (not needed for basic testing)
+        let station_config = StationClientConfig::new("", "");
+        let station_client =
+            StationClient::new(station_config).expect("Failed to create Station client");
+        StationNames::empty(station_client)
+    } else {
+        println!("Fetching station names from API...");
+        // Get credentials again (they're checked above so safe to unwrap)
+        let username = std::env::var("DARWIN_USERNAME").unwrap();
+        let password = std::env::var("DARWIN_PASSWORD").unwrap();
+
+        let station_config = StationClientConfig::new(&username, &password);
+        let station_client =
+            StationClient::new(station_config).expect("Failed to create Station client");
+        let names = StationNames::fetch(station_client)
+            .await
+            .expect("Failed to fetch station names");
+        println!("Loaded {} station names", names.len().await);
+        names
+    };
 
     // Spawn background task to refresh station names daily
     let station_names_refresh = station_names.clone();

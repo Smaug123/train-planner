@@ -1,0 +1,93 @@
+{
+  "generatedAt": "2026-01-03T14:00:00Z",
+  "locationName": "London Paddington",
+  "crs": "PAD",
+  "platformAvailable": true,
+  "areServicesAvailable": true,
+  "trainServices": [
+    {
+      "serviceID": "pad_service_1",
+      "rsid": "GW123400",
+      "std": "14:15",
+      "etd": "On time",
+      "platform": "1",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "length": 8,
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Bristol Temple Meads", "crs": "BRI"}
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Reading", "crs": "RDG", "st": "14:40", "et": "On time"},
+            {"locationName": "Swindon", "crs": "SWI", "st": "15:05", "et": "On time"},
+            {"locationName": "Bristol Parkway", "crs": "BPW", "st": "15:35", "et": "On time"},
+            {"locationName": "Bristol Temple Meads", "crs": "BRI", "st": "15:45", "et": "On time"}
+          ]
+        }
+      ]
+    },
+    {
+      "serviceID": "pad_service_2",
+      "rsid": "GW456700",
+      "std": "14:30",
+      "etd": "14:32",
+      "platform": "3",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "length": 5,
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Oxford", "crs": "OXF"}
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Reading", "crs": "RDG", "st": "14:55", "et": "14:57"},
+            {"locationName": "Didcot Parkway", "crs": "DID", "st": "15:10", "et": "15:12"},
+            {"locationName": "Oxford", "crs": "OXF", "st": "15:30", "et": "15:32"}
+          ]
+        }
+      ]
+    },
+    {
+      "serviceID": "pad_service_3",
+      "rsid": "GW789000",
+      "std": "14:45",
+      "etd": "On time",
+      "platform": "5",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "length": 10,
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Cardiff Central", "crs": "CDF"}
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Reading", "crs": "RDG", "st": "15:10", "et": "On time"},
+            {"locationName": "Swindon", "crs": "SWI", "st": "15:35", "et": "On time"},
+            {"locationName": "Bristol Parkway", "crs": "BPW", "st": "16:05", "et": "On time"},
+            {"locationName": "Newport (South Wales)", "crs": "NWP", "st": "16:25", "et": "On time"},
+            {"locationName": "Cardiff Central", "crs": "CDF", "st": "16:40", "et": "On time"}
+          ]
+        }
+      ]
+    }
+  ]
+}
