@@ -384,6 +384,72 @@ input[type="text"]::placeholder {
 }
 
 /* ========================================
+   AUTOCOMPLETE DROPDOWN
+   ======================================== */
+
+.autocomplete-wrapper {
+    position: relative;
+}
+
+.autocomplete-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 2px solid var(--forest-green);
+    border-top: none;
+    max-height: 280px;
+    overflow-y: auto;
+    z-index: 1000;
+    box-shadow: var(--shadow-md);
+}
+
+.autocomplete-dropdown:empty {
+    display: none;
+}
+
+.autocomplete-item {
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--cream-dark);
+}
+
+.autocomplete-item:last-child {
+    border-bottom: none;
+}
+
+.autocomplete-item:hover,
+.autocomplete-item.selected {
+    background: var(--cream);
+}
+
+.autocomplete-item.selected {
+    background: var(--cream-dark);
+}
+
+.autocomplete-crs {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--forest-green);
+}
+
+.autocomplete-station-name {
+    color: var(--warm-grey);
+    font-size: 0.875rem;
+}
+
+.autocomplete-item.selected .autocomplete-crs,
+.autocomplete-item:hover .autocomplete-crs {
+    color: var(--charcoal);
+}
+
+/* ========================================
    BUTTONS
    ======================================== */
 

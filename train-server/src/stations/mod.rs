@@ -14,4 +14,4 @@ mod names;
 pub use cache::{StationCache, StationCacheConfig};
 pub use client::{StationClient, StationClientConfig};
 pub use error::StationError;
-pub use names::StationNames;
+pub use names::{StationMatch, StationNames};

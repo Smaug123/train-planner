@@ -4,6 +4,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{Journey, Leg, RailTime, Segment, Service, Walk};
 
+/// Request to search stations by name or CRS code.
+#[derive(Debug, Deserialize)]
+pub struct StationSearchRequest {
+    /// Query string (partial CRS or station name)
+    pub q: String,
+
+    /// Maximum results to return (defaults to 10)
+    pub limit: Option<usize>,
+}
+
+/// Response for station search.
+#[derive(Debug, Serialize)]
+pub struct StationSearchResponse {
+    /// Matching stations
+    pub stations: Vec<StationSearchResult>,
+}
+
+/// A station in search results.
+#[derive(Debug, Serialize)]
+pub struct StationSearchResult {
+    /// CRS code
+    pub crs: String,
+
+    /// Station name
+    pub name: String,
+}
+
 /// Request to search for services.
 #[derive(Debug, Deserialize)]
 pub struct SearchServiceRequest {

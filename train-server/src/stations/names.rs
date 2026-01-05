@@ -135,6 +135,81 @@ impl StationNames {
     pub fn has_cache(&self) -> bool {
         self.cache.is_some()
     }
+
+    /// Search stations by query string.
+    ///
+    /// Matches stations where:
+    /// - The CRS code exactly matches (case-insensitive), or
+    /// - The station name contains the query as a substring (case-insensitive)
+    ///
+    /// Results are sorted: exact CRS matches first, then by name length (shorter first).
+    pub async fn search(&self, query: &str, limit: usize) -> Vec<StationMatch> {
+        let query_upper = query.trim().to_uppercase();
+        if query_upper.is_empty() {
+            return Vec::new();
+        }
+
+        let query_lower = query.trim().to_lowercase();
+        let guard = self.inner.read().await;
+
+        let mut results: Vec<StationMatch> = guard
+            .iter()
+            .filter_map(|(crs, name)| {
+                let crs_str = crs.as_str();
+                let name_lower = name.to_lowercase();
+
+                // Check for exact CRS match
+                if crs_str == query_upper {
+                    return Some(StationMatch {
+                        crs: crs_str.to_string(),
+                        name: name.clone(),
+                        score: 0, // Best score for exact CRS match
+                    });
+                }
+
+                // Check for CRS prefix match
+                if crs_str.starts_with(&query_upper) {
+                    return Some(StationMatch {
+                        crs: crs_str.to_string(),
+                        name: name.clone(),
+                        score: 1, // Good score for CRS prefix
+                    });
+                }
+
+                // Check for name substring match
+                if name_lower.contains(&query_lower) {
+                    // Score based on position and length - prefer matches at start and shorter names
+                    let position = name_lower.find(&query_lower).unwrap_or(0);
+                    let score = if position == 0 {
+                        2 // Prefix match in name
+                    } else {
+                        3 + position.min(100) // Later matches scored worse
+                    };
+                    return Some(StationMatch {
+                        crs: crs_str.to_string(),
+                        name: name.clone(),
+                        score: score + name.len().min(50), // Prefer shorter names
+                    });
+                }
+
+                None
+            })
+            .collect();
+
+        // Sort by score (lower is better), then alphabetically by name
+        results.sort_by(|a, b| a.score.cmp(&b.score).then_with(|| a.name.cmp(&b.name)));
+
+        results.truncate(limit);
+        results
+    }
+}
+
+/// A station search result with ranking score.
+#[derive(Debug, Clone)]
+pub struct StationMatch {
+    pub crs: String,
+    pub name: String,
+    pub score: usize,
 }
 
 /// Build the CRS → name map from station DTOs.

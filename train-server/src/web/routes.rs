@@ -27,6 +27,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/", get(index_page))
         .route("/health", get(health))
         .route("/about", get(about_page))
+        .route("/api/stations/search", get(search_stations))
         .route("/search/service", get(search_service))
         .route("/identify", get(identify_train))
         .route("/journey/plan", post(plan_journey))
@@ -58,6 +59,25 @@ async fn about_page() -> impl IntoResponse {
             .render()
             .unwrap_or_else(|e| format!("Template error: {}", e)),
     )
+}
+
+/// Search stations by name or CRS code.
+async fn search_stations(
+    State(state): State<AppState>,
+    Query(req): Query<StationSearchRequest>,
+) -> Json<StationSearchResponse> {
+    let limit = req.limit.unwrap_or(10).min(50);
+    let matches = state.station_names.search(&req.q, limit).await;
+
+    let stations = matches
+        .into_iter()
+        .map(|m| StationSearchResult {
+            crs: m.crs,
+            name: m.name,
+        })
+        .collect();
+
+    Json(StationSearchResponse { stations })
 }
 
 /// Check if request accepts HTML.
