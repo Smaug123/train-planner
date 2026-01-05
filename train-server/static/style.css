@@ -967,33 +967,17 @@ input[type="text"]::placeholder {
    DECORATIVE ELEMENTS
    ======================================== */
 
-/* Poster-style illustration placeholder */
+/* Poster-style illustration */
 .illustration-placeholder {
     width: 100%;
     max-width: 400px;
-    height: 200px;
     margin: 2rem auto;
-    background: linear-gradient(135deg, var(--forest-green) 0%, var(--forest-green-dark) 100%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--cream);
-    font-family: var(--font-display);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    position: relative;
-    overflow: hidden;
 }
 
-.illustration-placeholder::before {
-    content: "";
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 60px;
-    background: var(--mustard);
-    clip-path: polygon(0 100%, 100% 100%, 100% 30%, 80% 60%, 60% 20%, 40% 50%, 20% 30%, 0 70%);
+.illustration-placeholder img {
+    width: 100%;
+    height: auto;
+    display: block;
 }
 
 /* Geometric accents */

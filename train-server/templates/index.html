@@ -3,19 +3,6 @@
 {% block title %}Continuing Journey Planner{% endblock %}
 
 {% block content %}
-<div class="hero">
-    <h1>Continuing Journey Planner</h1>
-    <p class="subtitle">Already on a train? Find your best onward connection.</p>
-</div>
-
-<div class="poster-banner">
-    <p>Where will the railway take you today?</p>
-</div>
-
-<div class="illustration-placeholder">
-    <img src="/static/optimistic_train.png" alt="A 1930s-style poster illustration of a streamlined locomotive emerging from green countryside hills, running alongside a river, with an idyllic village church in the distance, and two people waving at the train from the foreground.">
-</div>
-
 <div class="search-panel">
     <div class="mode-toggle">
         <button type="button" class="mode-toggle-btn active" data-mode="identify">Already on a Train?</button>
@@ -97,6 +84,14 @@
 
 <div id="results-container">
     <!-- Search results will be inserted here -->
+</div>
+
+<div class="poster-banner">
+    <p>Where will the railway take you today?</p>
+</div>
+
+<div class="illustration-placeholder">
+    <img src="/static/optimistic_train.png" alt="A 1930s-style poster illustration of a streamlined locomotive emerging from green countryside hills, running alongside a river, with an idyllic village church in the distance, and two people waving at the train from the foreground.">
 </div>
 {% endblock %}
 
