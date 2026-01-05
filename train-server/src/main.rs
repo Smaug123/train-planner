@@ -44,7 +44,19 @@ async fn main() {
             std::process::exit(1);
         });
 
-        let darwin_config = DarwinConfig::new(&api_key);
+        let mut darwin_config = DarwinConfig::new(&api_key);
+
+        // Check for optional arrivals API key (separate product on Rail Data Marketplace)
+        if let Ok(arrivals_key) = std::env::var("DARWIN_ARRIVALS_API_KEY") {
+            println!("Arrivals API configured");
+            darwin_config = darwin_config.with_arrivals_api_key(arrivals_key);
+        } else {
+            println!(
+                "Note: DARWIN_ARRIVALS_API_KEY not set. Train identification at terminus stations won't work.\n\
+                 Subscribe to the arrivals product on Rail Data Marketplace for this feature."
+            );
+        }
+
         let client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
         DarwinClientImpl::Real(client)
     };

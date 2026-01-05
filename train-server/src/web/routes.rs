@@ -185,30 +185,27 @@ async fn identify_train(
             ),
         })?;
 
-    // Check if next station is the terminus - this means the train is arriving,
-    // not departing, so it won't appear on the departure board
-    if terminus.as_ref() == Some(&next_station) {
-        return Err(AppError::BadRequest {
-            message: format!(
-                "Next station ({}) is the same as terminus - the train is arriving at its final destination. \
-                 Try entering the previous station as 'next station', or omit the terminus.",
-                next_station.as_str()
-            ),
-        });
-    }
-
     // Get current time info
     let now = Local::now();
     let date = now.date_naive();
     let current_mins = (now.time().hour() * 60 + now.time().minute()) as u16;
 
-    // Query the NEXT station's departure board
-    // Trains departing in next ~30 mins from that station
-    let services = state
-        .darwin
-        .get_departures_with_details(&next_station, date, current_mins, 0, 30)
-        .await
-        .map_err(AppError::from)?;
+    // Query the appropriate board based on whether the train is arriving at terminus
+    let services = if terminus.as_ref() == Some(&next_station) {
+        // Train is arriving at terminus - use arrivals board
+        state
+            .darwin
+            .get_arrivals_with_details(&next_station, date, current_mins, 0, 30)
+            .await
+            .map_err(AppError::from)?
+    } else {
+        // Normal case - use departures board
+        state
+            .darwin
+            .get_departures_with_details(&next_station, date, current_mins, 0, 30)
+            .await
+            .map_err(AppError::from)?
+    };
 
     // Filter and rank matches using the extracted logic
     let matches = filter_and_rank_matches(&services, terminus.as_ref());

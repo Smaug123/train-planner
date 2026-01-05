@@ -15,9 +15,14 @@ use super::convert::{ConvertedService, convert_station_board};
 use super::error::DarwinError;
 use super::types::{ServiceDetails, StationBoardWithDetails};
 
-/// Default base URL for Darwin LDB API.
-const DEFAULT_BASE_URL: &str =
+/// Default base URL for Darwin LDB departures API.
+const DEFAULT_DEPARTURES_URL: &str =
     "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS";
+
+/// Default base URL for Darwin LDB arrivals API.
+/// This is a separate product on Rail Data Marketplace.
+const DEFAULT_ARRIVALS_URL: &str =
+    "https://api1.raildata.org.uk/1010-live-arrival-board-arr/LDBWS";
 
 /// Default maximum concurrent requests.
 const DEFAULT_MAX_CONCURRENT: usize = 5;
@@ -25,10 +30,12 @@ const DEFAULT_MAX_CONCURRENT: usize = 5;
 /// Configuration for the Darwin client.
 #[derive(Debug, Clone)]
 pub struct DarwinConfig {
-    /// API key for x-apikey header authentication
+    /// API key for departures (x-apikey header)
     pub api_key: String,
-    /// Base URL for the API (defaults to production Darwin)
-    pub base_url: String,
+    /// API key for arrivals (separate product, may differ from departures key)
+    pub arrivals_api_key: Option<String>,
+    /// Base URL for departures API
+    pub departures_url: String,
     /// Maximum concurrent requests
     pub max_concurrent: usize,
     /// Request timeout in seconds
@@ -40,15 +47,24 @@ impl DarwinConfig {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
+            arrivals_api_key: None,
+            departures_url: DEFAULT_DEPARTURES_URL.to_string(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             timeout_secs: 30,
         }
     }
 
-    /// Set a custom base URL (for testing).
+    /// Set a custom base URL for departures (for testing).
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
+        self.departures_url = url.into();
+        self
+    }
+
+    /// Set the API key for the arrivals product.
+    /// Required to use `get_arrivals_with_details` - arrivals is a separate
+    /// product on the Rail Data Marketplace with its own API key.
+    pub fn with_arrivals_api_key(mut self, key: impl Into<String>) -> Self {
+        self.arrivals_api_key = Some(key.into());
         self
     }
 
@@ -72,7 +88,8 @@ impl DarwinConfig {
 #[derive(Debug, Clone)]
 pub struct DarwinClient {
     http: reqwest::Client,
-    base_url: String,
+    departures_url: String,
+    arrivals_api_key: Option<String>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -96,7 +113,8 @@ impl DarwinClient {
 
         Ok(Self {
             http,
-            base_url: config.base_url,
+            departures_url: config.departures_url,
+            arrivals_api_key: config.arrivals_api_key,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
         })
     }
@@ -133,7 +151,7 @@ impl DarwinClient {
 
         let url = format!(
             "{}/api/20220120/GetDepBoardWithDetails/{}",
-            self.base_url,
+            self.departures_url,
             crs.as_str()
         );
 
@@ -211,7 +229,7 @@ impl DarwinClient {
 
         let url = format!(
             "{}/api/20220120/GetDepBoardWithDetails/{}",
-            self.base_url,
+            self.departures_url,
             crs.as_str()
         );
 
@@ -284,7 +302,7 @@ impl DarwinClient {
 
         let url = format!(
             "{}/api/20220120/GetServiceDetails/{}",
-            self.base_url, service_id
+            self.departures_url, service_id
         );
 
         let response = self.http.get(&url).send().await?;
@@ -324,6 +342,96 @@ impl DarwinClient {
         })
     }
 
+    /// Get arrival board with details for a station.
+    ///
+    /// Returns services arriving at the station with their calling points.
+    /// Use this when querying a train's terminus station - the train won't
+    /// appear on departures because it's arriving, not departing.
+    ///
+    /// **Note:** Requires the arrivals API key to be configured. This is a
+    /// separate product on the Rail Data Marketplace from departures.
+    ///
+    /// # Arguments
+    ///
+    /// * `crs` - Station CRS code
+    /// * `num_rows` - Number of services to return (max 150)
+    /// * `time_offset` - Minutes offset from now (-120 to 120)
+    /// * `time_window` - Minutes window for results (0 to 120)
+    /// * `board_date` - Date to use for parsing times
+    pub async fn get_arrivals_with_details(
+        &self,
+        crs: &Crs,
+        num_rows: u8,
+        time_offset: i16,
+        time_window: u16,
+        board_date: NaiveDate,
+    ) -> Result<Vec<ConvertedService>, DarwinError> {
+        let arrivals_api_key = self.arrivals_api_key.as_ref().ok_or_else(|| DarwinError::ApiError {
+            status: 0,
+            message: "Arrivals API not configured. Set DARWIN_ARRIVALS_API_KEY and subscribe to the arrivals product on Rail Data Marketplace.".to_string(),
+        })?;
+
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| DarwinError::ApiError {
+                status: 0,
+                message: "Semaphore closed".to_string(),
+            })?;
+
+        let url = format!(
+            "{}/api/20220120/GetArrBoardWithDetails/{}",
+            DEFAULT_ARRIVALS_URL,
+            crs.as_str()
+        );
+
+        // Use arrivals API key (different product, different key)
+        let response = self
+            .http
+            .get(&url)
+            .header("x-apikey", arrivals_api_key)
+            .query(&[
+                ("numRows", num_rows.to_string()),
+                ("timeOffset", time_offset.to_string()),
+                ("timeWindow", time_window.to_string()),
+            ])
+            .send()
+            .await?;
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(DarwinError::Unauthorized);
+        }
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(DarwinError::RateLimited);
+        }
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            eprintln!("[Darwin] {status} from {url}");
+            return Err(DarwinError::ApiError {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let body = response.text().await?;
+
+        let board: StationBoardWithDetails =
+            serde_json::from_str(&body).map_err(|e| DarwinError::Json {
+                message: e.to_string(),
+                body: Some(body.chars().take(500).collect()),
+            })?;
+
+        convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
+            message: e.to_string(),
+            body: None,
+        })
+    }
+
     /// Get the raw departure board response (for debugging/testing).
     pub async fn get_departures_raw(
         &self,
@@ -341,7 +449,7 @@ impl DarwinClient {
 
         let url = format!(
             "{}/api/20220120/GetDepBoardWithDetails/{}",
-            self.base_url,
+            self.departures_url,
             crs.as_str()
         );
 
@@ -379,11 +487,13 @@ mod tests {
     fn config_builder() {
         let config = DarwinConfig::new("test-api-key")
             .with_base_url("http://localhost:8080")
+            .with_arrivals_api_key("arrivals-key")
             .with_max_concurrent(10)
             .with_timeout(60);
 
         assert_eq!(config.api_key, "test-api-key");
-        assert_eq!(config.base_url, "http://localhost:8080");
+        assert_eq!(config.departures_url, "http://localhost:8080");
+        assert_eq!(config.arrivals_api_key, Some("arrivals-key".to_string()));
         assert_eq!(config.max_concurrent, 10);
         assert_eq!(config.timeout_secs, 60);
     }
@@ -393,7 +503,8 @@ mod tests {
         let config = DarwinConfig::new("test-api-key");
 
         assert_eq!(config.api_key, "test-api-key");
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(config.departures_url, DEFAULT_DEPARTURES_URL);
+        assert_eq!(config.arrivals_api_key, None);
         assert_eq!(config.max_concurrent, DEFAULT_MAX_CONCURRENT);
         assert_eq!(config.timeout_secs, 30);
     }

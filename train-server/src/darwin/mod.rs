@@ -74,4 +74,39 @@ impl DarwinClientImpl {
             }
         }
     }
+
+    /// Get arrival board with details for a station.
+    pub async fn get_arrivals_with_details(
+        &self,
+        crs: &Crs,
+        num_rows: u8,
+        time_offset: i16,
+        time_window: u16,
+        board_date: NaiveDate,
+    ) -> Result<Vec<ConvertedService>, DarwinError> {
+        match self {
+            Self::Real(client) => {
+                client
+                    .get_arrivals_with_details(
+                        crs,
+                        num_rows,
+                        time_offset,
+                        time_window,
+                        board_date,
+                    )
+                    .await
+            }
+            Self::Mock(client) => {
+                client
+                    .get_arrivals_with_details(
+                        crs,
+                        num_rows,
+                        time_offset,
+                        time_window,
+                        board_date,
+                    )
+                    .await
+            }
+        }
+    }
 }

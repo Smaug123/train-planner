@@ -16,10 +16,18 @@ use moka::future::Cache as MokaCache;
 use crate::darwin::{ConvertedService, DarwinClientImpl, DarwinError};
 use crate::domain::Crs;
 
-/// Cache key for departure boards: (station CRS, date, time bucket, time window).
+/// Board type: departures or arrivals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BoardType {
+    Departures,
+    Arrivals,
+}
+
+/// Cache key for station boards: (station CRS, date, time bucket, time window, board type).
 /// Time bucket is minutes from midnight divided by bucket_mins.
 /// Time window is included because the API returns different data for different windows.
-type BoardKey = (Crs, NaiveDate, u16, u16);
+/// Board type distinguishes arrivals from departures.
+type BoardKey = (Crs, NaiveDate, u16, u16, BoardType);
 
 /// Cached departure board entry.
 type BoardEntry = Arc<Vec<Arc<ConvertedService>>>;
@@ -78,12 +86,12 @@ impl DarwinCache {
     }
 
     /// Get a cached board entry.
-    pub async fn get_board(&self, key: &BoardKey) -> Option<BoardEntry> {
+    async fn get_board(&self, key: &BoardKey) -> Option<BoardEntry> {
         self.boards.get(key).await
     }
 
     /// Insert a board entry into the cache.
-    pub async fn insert_board(&self, key: BoardKey, entry: BoardEntry) {
+    async fn insert_board(&self, key: BoardKey, entry: BoardEntry) {
         self.boards.insert(key, entry).await;
     }
 
@@ -132,7 +140,7 @@ impl CachedDarwinClient {
         time_window: u16,
     ) -> Result<Arc<Vec<Arc<ConvertedService>>>, DarwinError> {
         let bucket = self.cache.time_bucket(time_offset, current_mins);
-        let key = (*crs, date, bucket, time_window);
+        let key = (*crs, date, bucket, time_window, BoardType::Departures);
 
         // Try cache first
         if let Some(cached) = self.cache.get_board(&key).await {
@@ -143,6 +151,41 @@ impl CachedDarwinClient {
         let services = self
             .client
             .get_departures_with_details(crs, 15, time_offset, time_window, date)
+            .await?;
+
+        // Wrap in Arc for sharing
+        let services: Vec<Arc<ConvertedService>> = services.into_iter().map(Arc::new).collect();
+        let entry = Arc::new(services);
+
+        // Cache and return
+        self.cache.insert_board(key, entry.clone()).await;
+
+        Ok(entry)
+    }
+
+    /// Get arrivals with details, using cache if available.
+    ///
+    /// Use this when the train is arriving at its terminus station.
+    pub async fn get_arrivals_with_details(
+        &self,
+        crs: &Crs,
+        date: NaiveDate,
+        current_mins: u16,
+        time_offset: i16,
+        time_window: u16,
+    ) -> Result<Arc<Vec<Arc<ConvertedService>>>, DarwinError> {
+        let bucket = self.cache.time_bucket(time_offset, current_mins);
+        let key = (*crs, date, bucket, time_window, BoardType::Arrivals);
+
+        // Try cache first
+        if let Some(cached) = self.cache.get_board(&key).await {
+            return Ok(cached);
+        }
+
+        // Fetch from API
+        let services = self
+            .client
+            .get_arrivals_with_details(crs, 15, time_offset, time_window, date)
             .await?;
 
         // Wrap in Arc for sharing
@@ -259,9 +302,9 @@ mod fixed_behavior_tests {
 
         let bucket = cache.time_bucket(0, current_mins);
 
-        // Keys now include time_window as fourth element
-        let key_30: BoardKey = (crs, date, bucket, 30);
-        let key_120: BoardKey = (crs, date, bucket, 120);
+        // Keys now include time_window as fourth element and board type as fifth
+        let key_30: BoardKey = (crs, date, bucket, 30, BoardType::Departures);
+        let key_120: BoardKey = (crs, date, bucket, 120, BoardType::Departures);
 
         // Keys are now different because time_window differs
         assert_ne!(

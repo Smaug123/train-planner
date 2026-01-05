@@ -49,8 +49,12 @@ This is a Rust web application for planning train journey connections. The user 
 ## Environment Variables
 
 ```bash
-DARWIN_API_KEY=<consumer key from Rail Data Marketplace for LDBWS product>
+DARWIN_API_KEY=<consumer key from Rail Data Marketplace for LDBWS departures product>
 LISTEN_ADDR=127.0.0.1:3000
+
+# Optional: for arrivals board (separate Rail Data Marketplace product)
+# Required for train identification when next_station == terminus
+DARWIN_ARRIVALS_API_KEY=<consumer key for arrivals product>
 
 # Optional: for station name lookups (Rail Data Marketplace stations feed)
 STATION_API_KEY=<consumer key for stations knowledgebase product>

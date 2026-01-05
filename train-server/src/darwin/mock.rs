@@ -121,6 +121,37 @@ impl MockDarwinClient {
         })
     }
 
+    /// Get arrival board with details for a station.
+    ///
+    /// Mimics the real `DarwinClient::get_arrivals_with_details` interface.
+    /// For mock purposes, returns the same data as departures (JSON structure is identical).
+    pub async fn get_arrivals_with_details(
+        &self,
+        crs: &Crs,
+        _num_rows: u8,
+        _time_offset: i16,
+        _time_window: u16,
+        board_date: NaiveDate,
+    ) -> Result<Vec<ConvertedService>, DarwinError> {
+        // Arrivals use the same JSON structure as departures, just with sta/eta instead of std/etd.
+        // For mock purposes, we reuse the same data.
+        let boards = self.boards.read().await;
+
+        let board = boards.get(crs).ok_or_else(|| DarwinError::ApiError {
+            status: 404,
+            message: format!(
+                "No mock data for station {}. Available: {:?}",
+                crs.as_str(),
+                boards.keys().map(|c| c.as_str()).collect::<Vec<_>>()
+            ),
+        })?;
+
+        convert_station_board(board, board_date).map_err(|e| DarwinError::ApiError {
+            status: 500,
+            message: format!("Failed to convert mock board data: {}", e),
+        })
+    }
+
     /// List available stations in the mock data.
     pub async fn available_stations(&self) -> Vec<Crs> {
         let boards = self.boards.read().await;
