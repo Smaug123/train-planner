@@ -75,14 +75,8 @@
             cp -r train-server/templates $out/share/train-server/
 
             # Create wrapper that sets STATIC_DIR
-            mv $out/bin/train-server $out/bin/.train-server-unwrapped
-            cat > $out/bin/train-server <<'WRAPPER'
-#!/usr/bin/env bash
-export STATIC_DIR="''${STATIC_DIR:-PLACEHOLDER_OUT/share/train-server/static}"
-exec PLACEHOLDER_OUT/bin/.train-server-unwrapped "$@"
-WRAPPER
-            substituteInPlace $out/bin/train-server --replace-fail PLACEHOLDER_OUT $out
-            chmod +x $out/bin/train-server
+            wrapProgram $out/bin/train-server \
+              --set-default STATIC_DIR "$out/share/train-server/static"
           '';
 
           meta = with pkgs.lib; {
