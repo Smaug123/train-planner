@@ -756,8 +756,10 @@ mod tests {
 
         let provider = MockProvider::new(vec![s2, s3, s4, s5]);
         let walkable = WalkableConnections::new();
-        let mut config = SearchConfig::default();
-        config.max_changes = 2; // Only allow 2 changes
+        let config = SearchConfig {
+            max_changes: 2, // Only allow 2 changes
+            ..Default::default()
+        };
 
         let planner = Planner::new(&provider, &walkable, &config);
 
@@ -923,12 +925,10 @@ mod proptests {
 
         // Try direct route first
         if let Some((dest_idx, _)) = current_service.find_call(destination, current_position.next())
+            && let Ok(leg) = Leg::new(current_service.clone(), current_position, dest_idx)
+            && let Ok(journey) = Journey::new(vec![Segment::Train(leg)])
         {
-            if let Ok(leg) = Leg::new(current_service.clone(), current_position, dest_idx) {
-                if let Ok(journey) = Journey::new(vec![Segment::Train(leg)]) {
-                    results.push(journey);
-                }
-            }
+            results.push(journey);
         }
 
         // DFS from each intermediate alighting point
@@ -997,10 +997,10 @@ mod proptests {
             Segment::Train(leg) => leg.departure_time(),
             Segment::Walk(_) => time,
         });
-        if let Some(dep) = first_dep {
-            if time.signed_duration_since(dep) > config.max_journey() {
-                return;
-            }
+        if let Some(dep) = first_dep
+            && time.signed_duration_since(dep) > config.max_journey()
+        {
+            return;
         }
 
         // Limit recursion depth to avoid infinite loops
@@ -1124,9 +1124,11 @@ mod proptests {
             // Build mock provider
             let provider = MockProvider { services: network.clone() };
             let walkable = WalkableConnections::new();
-            let mut config = SearchConfig::default();
-            config.max_changes = 2;
-            config.max_results = 100; // Don't limit results for comparison
+            let config = SearchConfig {
+                max_changes: 2,
+                max_results: 100, // Don't limit results for comparison
+                ..Default::default()
+            };
 
             // Run BFS
             let planner = Planner::new(&provider, &walkable, &config);
@@ -1184,8 +1186,10 @@ mod proptests {
 
             let provider = MockProvider { services: network };
             let walkable = WalkableConnections::new();
-            let mut config = SearchConfig::default();
-            config.max_changes = 2;
+            let config = SearchConfig {
+                max_changes: 2,
+                ..Default::default()
+            };
 
             let planner = Planner::new(&provider, &walkable, &config);
             let request = SearchRequest::new(current, CallIndex(0), dest);
@@ -1235,10 +1239,10 @@ mod proptests {
             if request.validate().is_ok() {
                 tests_with_valid_request.set(tests_with_valid_request.get() + 1);
 
-                if let Ok(result) = planner.search(&request) {
-                    if !result.journeys.is_empty() {
-                        journeys_found.set(journeys_found.get() + 1);
-                    }
+                if let Ok(result) = planner.search(&request)
+                    && !result.journeys.is_empty()
+                {
+                    journeys_found.set(journeys_found.get() + 1);
                 }
             }
 

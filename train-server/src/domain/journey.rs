@@ -321,7 +321,7 @@ mod tests {
         let from = crs(from_crs);
         let to = crs(to_crs);
 
-        let mut call1 = Call::new(from.clone(), from_name.into());
+        let mut call1 = Call::new(from, from_name.into());
         call1.booked_departure = Some(time(dep));
 
         let mut call2 = Call::new(to, to_name.into());
@@ -622,11 +622,10 @@ mod proptests {
         }
 
         let mut legs = Vec::new();
-        let mut current_station = 0usize;
         // Use the first param's dep_mins but constrain to avoid wrapping
         let mut current_time_mins = params[0].1.min(600); // Start no later than 10:00
 
-        for &(_, _, duration) in params.iter() {
+        for (current_station, &(_, _, duration)) in params.iter().enumerate() {
             // Ensure time progresses and doesn't exceed day boundary
             // to avoid times wrapping and confusing the comparisons
             if current_time_mins + duration >= 1440 {
@@ -639,7 +638,6 @@ mod proptests {
             legs.push(leg);
 
             // Next leg starts at next station, after some connection time
-            current_station += 1;
             current_time_mins = current_time_mins + duration + 10; // 10 min connection
         }
 

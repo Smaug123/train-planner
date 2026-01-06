@@ -110,7 +110,7 @@ mod tests {
         stations: &[(&str, &str)], // (crs, name) pairs
         departure_time: RailTime,
     ) -> Arc<ConvertedService> {
-        let mut calls: Vec<Call> = stations
+        let calls: Vec<Call> = stations
             .iter()
             .enumerate()
             .map(|(i, (crs_str, name))| {
@@ -148,13 +148,13 @@ mod tests {
 
         let candidate = ServiceCandidate {
             service_ref: service.service_ref.clone(),
-            headcode: service.headcode.clone(),
+            headcode: service.headcode,
             scheduled_departure: departure_time,
             expected_departure: None,
             destination: destination_name,
             destination_crs,
             operator: "Test Operator".to_string(),
-            operator_code: service.operator_code.clone(),
+            operator_code: service.operator_code,
             platform: Some("1".to_string()),
             is_cancelled: false,
         };
@@ -463,10 +463,6 @@ mod property_tests {
         NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()
     }
 
-    fn crs(s: &str) -> Crs {
-        Crs::parse(s).unwrap()
-    }
-
     /// Generate a valid 3-letter CRS code
     fn arb_crs() -> impl Strategy<Value = Crs> {
         "[A-Z]{3}".prop_map(|s| Crs::parse(&s).unwrap())
@@ -514,7 +510,7 @@ mod property_tests {
 
                 let candidate = ServiceCandidate {
                     service_ref: service.service_ref.clone(),
-                    headcode: service.headcode.clone(),
+                    headcode: service.headcode,
                     scheduled_departure: dep_time,
                     expected_departure: None,
                     destination: "Terminus".to_string(),

@@ -814,10 +814,10 @@ mod proptests {
             let t = RailTime::parse_hhmm(&time_str, date).unwrap();
             let dur = Duration::minutes(minutes);
 
-            if let Some(added) = t.checked_add(dur) {
-                if let Some(result) = added.checked_sub(dur) {
-                    prop_assert_eq!(t, result);
-                }
+            if let Some(added) = t.checked_add(dur)
+                && let Some(result) = added.checked_sub(dur)
+            {
+                prop_assert_eq!(t, result);
             }
         }
 
@@ -981,14 +981,15 @@ mod proptests {
             post_midnight_hour in 0u32..4,
             date in valid_date()
         ) {
-            let times = vec![
+            let times = [
                 Some(format!("{:02}:00", pre_midnight_hour)),
                 Some(format!("{:02}:00", post_midnight_hour)),
             ];
 
-            let time_refs: Vec<Option<&str>> = times.iter()
-                .map(|o| o.as_deref())
-                .collect();
+            let time_refs: [Option<&str>; 2] = [
+                times[0].as_deref(),
+                times[1].as_deref(),
+            ];
             let parsed = parse_time_sequence(&time_refs, date).unwrap();
 
             if let Some(next_day) = date.succ_opt() {
@@ -1007,14 +1008,15 @@ mod proptests {
             pre_midnight_hour in 22u32..24,
             date in valid_date()
         ) {
-            let times = vec![
+            let times = [
                 Some(format!("{:02}:00", post_midnight_hour)),
                 Some(format!("{:02}:00", pre_midnight_hour)),
             ];
 
-            let time_refs: Vec<Option<&str>> = times.iter()
-                .map(|o| o.as_deref())
-                .collect();
+            let time_refs: [Option<&str>; 2] = [
+                times[0].as_deref(),
+                times[1].as_deref(),
+            ];
             let parsed = parse_time_sequence_reverse(&time_refs, date).unwrap();
 
             if let Some(prev_day) = date.pred_opt() {
