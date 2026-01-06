@@ -4,13 +4,14 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
+  outputs = { self, nixpkgs, flake-utils, crane, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -18,35 +19,51 @@
           inherit system overlays;
           config.allowUnfree = true;
         };
-        
+
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "clippy" ];
         };
-        
-        train-server = pkgs.rustPlatform.buildRustPackage {
-          pname = "train-server";
-          version = "0.1.0";
 
+        craneLib = (crane.mkLib pkgs).overrideToolchain (_: rustToolchain);
+
+        src = pkgs.lib.cleanSourceWith {
           src = ./.;
+          filter = path: type:
+            (craneLib.filterCargoSources path type);
+        };
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
+        commonBuildInputs = with pkgs; [
+          openssl
+          libiconv
+        ];
 
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-          ];
+        commonNativeBuildInputs = with pkgs; [
+          pkg-config
+        ];
 
-          buildInputs = with pkgs; [
-            openssl
-            libiconv
-          ];
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
+          buildInputs = commonBuildInputs;
+          nativeBuildInputs = commonNativeBuildInputs;
+          version = "0.1.0";
+        };
+
+        # Build *only* the dependencies - this derivation gets cached
+        cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
+          pname = "train-server-deps";
+          cargoExtraArgs = "--locked --workspace";
+        });
+
+        train-server = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "train-server";
 
           # Pass git revision to the build
           TRAIN_SERVER_GIT_HASH = if (self ? rev) && (self.rev != null) then self.rev else "dirty";
 
           # Build only the server binary
-          buildAndTestSubdir = "train-server";
+          cargoExtraArgs = "--locked -p train-server";
 
           meta = with pkgs.lib; {
             description = "Train planner server";
@@ -54,18 +71,16 @@
             license = licenses.mit;
             maintainers = [ ];
           };
-        };
+        });
       in
       {
         packages = {
           default = train-server;
           train-server = train-server;
         };
-        
-        devShells.default = pkgs.mkShell {
-          buildInputs = [
-            rustToolchain
-            pkgs.cargo
+
+        devShells.default = craneLib.devShell {
+          packages = [
             pkgs.pkg-config
             pkgs.openssl
             pkgs.libiconv
