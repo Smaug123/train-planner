@@ -5,4 +5,18 @@ edition = "2024"
 
 [dependencies]
 axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
+thiserror = "2"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+moka = { version = "0.12", features = ["future"] }
+askama = "0.12"
+askama_axum = "0.4"
+tower-http = { version = "0.5", features = ["fs"] }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
