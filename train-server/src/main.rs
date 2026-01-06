@@ -149,7 +149,12 @@ async fn main() {
     let app = create_router(state);
 
     // Bind and serve
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr: SocketAddr = std::env::var("LISTEN_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
+        .parse()
+        .expect(
+            "LISTEN_ADDR must be a valid socket address (e.g., 127.0.0.1:3000 or 0.0.0.0:8080)",
+        );
     println!("Train Journey Planner listening on http://{addr}");
     println!();
     println!("Open http://{addr} in your browser for the web interface.");
