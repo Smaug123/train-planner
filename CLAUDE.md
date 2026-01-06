@@ -58,4 +58,8 @@ DARWIN_ARRIVALS_API_KEY=<consumer key for arrivals product>
 
 # Optional: for station name lookups (Rail Data Marketplace stations feed)
 STATION_API_KEY=<consumer key for stations knowledgebase product>
+
+# Optional: path to static assets directory (default: train-server/static)
+# The Nix flake wrapper sets this automatically
+STATIC_DIR=train-server/static
 ```

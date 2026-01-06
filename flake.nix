@@ -31,7 +31,8 @@
           filter = path: type:
             (craneLib.filterCargoSources path type)
             || (builtins.match ".*\.html$" path != null)
-            || (builtins.match ".*\.json$" path != null);
+            || (builtins.match ".*\.json$" path != null)
+            || (builtins.match ".*/static/.*" path != null);
         };
 
         commonBuildInputs = with pkgs; [
@@ -66,6 +67,22 @@
 
           # Build only the server binary
           cargoExtraArgs = "--locked -p train-server";
+
+          postInstall = ''
+            mkdir -p $out/share/train-server
+            cp -r train-server/static $out/share/train-server/
+            cp -r train-server/templates $out/share/train-server/
+
+            # Create wrapper that sets STATIC_DIR
+            mv $out/bin/train-server $out/bin/.train-server-unwrapped
+            cat > $out/bin/train-server <<'WRAPPER'
+#!/usr/bin/env bash
+export STATIC_DIR="''${STATIC_DIR:-PLACEHOLDER_OUT/share/train-server/static}"
+exec PLACEHOLDER_OUT/bin/.train-server-unwrapped "$@"
+WRAPPER
+            substituteInPlace $out/bin/train-server --replace-fail PLACEHOLDER_OUT $out
+            chmod +x $out/bin/train-server
+          '';
 
           meta = with pkgs.lib; {
             description = "Train planner server";
