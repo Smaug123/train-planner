@@ -2,6 +2,21 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use train_server::cache::{CacheConfig, CachedDarwinClient};
+
+/// Read a secret from environment, preferring `{name}_FILE` over `{name}`.
+///
+/// If `{name}_FILE` is set, reads the file and returns its contents (trimmed).
+/// Panics if the file cannot be read.
+/// Otherwise, returns the value of `{name}` if set.
+fn read_secret(name: &str) -> Option<String> {
+    let file_var = format!("{}_FILE", name);
+    if let Ok(path) = std::env::var(&file_var) {
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to read {} from {}: {}", name, path, e));
+        return Some(contents.trim().to_string());
+    }
+    std::env::var(name).ok()
+}
 use train_server::darwin::{DarwinClient, DarwinClientImpl, DarwinConfig, MockDarwinClient};
 use train_server::planner::SearchConfig;
 use train_server::stations::{
@@ -37,7 +52,7 @@ async fn main() {
         DarwinClientImpl::Mock(mock)
     } else {
         println!("Using REAL Darwin client");
-        let api_key = std::env::var("DARWIN_API_KEY").unwrap_or_else(|_| {
+        let api_key = read_secret("DARWIN_API_KEY").unwrap_or_else(|| {
             eprintln!(
                 "Error: DARWIN_API_KEY not set. Set USE_MOCK_DARWIN=true to use mock data instead."
             );
@@ -47,7 +62,7 @@ async fn main() {
         let mut darwin_config = DarwinConfig::new(&api_key);
 
         // Check for optional arrivals API key (separate product on Rail Data Marketplace)
-        if let Ok(arrivals_key) = std::env::var("DARWIN_ARRIVALS_API_KEY") {
+        if let Some(arrivals_key) = read_secret("DARWIN_ARRIVALS_API_KEY") {
             println!("Arrivals API configured");
             darwin_config = darwin_config.with_arrivals_api_key(arrivals_key);
         } else {
@@ -79,7 +94,7 @@ async fn main() {
         let station_client =
             StationClient::new(station_config).expect("Failed to create Station client");
         StationNames::empty(station_client)
-    } else if let Ok(api_key) = std::env::var("STATION_API_KEY") {
+    } else if let Some(api_key) = read_secret("STATION_API_KEY") {
         let station_config = StationClientConfig::new(&api_key);
         let station_client =
             StationClient::new(station_config).expect("Failed to create Station client");
