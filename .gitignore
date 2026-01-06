@@ -2,3 +2,5 @@
 target/
 result
 .venv/
+.env
+stations_cache.json

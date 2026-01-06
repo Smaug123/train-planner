@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Error - Continuing Journey Planner{% endblock %}
+
+{% block content %}
+<div class="error-page">
+    <!-- Stylised illustration placeholder: A dejected-looking 1930s railway porter
+         standing next to a signal showing "danger" (red), with geometric clouds
+         and a silhouette of a stationary locomotive in the background.
+         The mood should be apologetic but still retain the vintage charm. -->
+    <div class="illustration-placeholder" style="background: var(--burgundy);">
+        <span>[ Signal at Danger ]</span>
+    </div>
+
+    <h1>{{ title }}</h1>
+
+    <div class="error-message">
+        <p>{{ message }}</p>
+    </div>
+
+    {% if let Some(details) = details %}
+    <details style="max-width: 500px; margin: 0 auto 2rem; text-align: left;">
+        <summary style="cursor: pointer; color: var(--warm-grey);">Technical details</summary>
+        <pre style="background: var(--cream-dark); padding: 1rem; margin-top: 0.5rem; overflow-x: auto; font-size: 0.875rem;">{{ details }}</pre>
+    </details>
+    {% endif %}
+
+    <a href="/" class="btn btn-primary">Return to Home</a>
+</div>
+{% endblock %}

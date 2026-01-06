@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}About - Continuing Journey Planner{% endblock %}
+
+{% block content %}
+<div class="hero">
+    <h1>About This Service</h1>
+</div>
+
+<div class="search-panel" style="max-width: 800px;">
+    <h2>The Problem</h2>
+
+    <p>Traditional journey planners answer: "How do I get from A to B?"</p>
+
+    <p>But what if you're <em>already on a train</em> that's running late? Existing tools don't help you answer: "I'm on <strong>this specific service</strong>, arriving at interchange stations at <strong>these predicted times</strong>&mdash;what are my best onward connections?"</p>
+
+    <div class="poster-banner">
+        <p>The Continuing Journey Planner fills this gap</p>
+    </div>
+
+    <h2>How It Works</h2>
+
+    <ol style="margin-left: 1.5rem; margin-bottom: 1.5rem;">
+        <li style="margin-bottom: 0.75rem;">
+            <strong>Find your train</strong> by entering where it departed from and when (or its headcode)
+        </li>
+        <li style="margin-bottom: 0.75rem;">
+            <strong>Select your current position</strong> from the calling points list
+        </li>
+        <li style="margin-bottom: 0.75rem;">
+            <strong>Enter your destination</strong> and we'll find the best onward connections
+        </li>
+    </ol>
+
+    <p>We use real-time data from the Darwin Live Departure Boards API, so journey suggestions account for current delays and predicted arrival times.</p>
+
+    <h2>Features</h2>
+
+    <ul style="margin-left: 1.5rem; margin-bottom: 1.5rem;">
+        <li style="margin-bottom: 0.5rem;">Real-time departure information</li>
+        <li style="margin-bottom: 0.5rem;">Multi-leg journey planning (up to 2 changes)</li>
+        <li style="margin-bottom: 0.5rem;">Walking connections between nearby stations (e.g., London termini)</li>
+        <li style="margin-bottom: 0.5rem;">Smart ranking of journey options by arrival time and changes</li>
+    </ul>
+
+    <h2>Limitations</h2>
+
+    <ul style="margin-left: 1.5rem; margin-bottom: 1.5rem;">
+        <li style="margin-bottom: 0.5rem;">Currently requires station codes (CRS) &mdash; full station name lookup coming soon</li>
+        <li style="margin-bottom: 0.5rem;">Darwin service IDs are ephemeral; you cannot bookmark specific services</li>
+        <li style="margin-bottom: 0.5rem;">No fare information &mdash; check with your ticket provider for validity</li>
+    </ul>
+
+    <h2>Technical Notes</h2>
+
+    <p>Built with Rust, using data from the <a href="https://raildata.org.uk/" target="_blank" rel="noopener">Rail Data Marketplace</a>. This is an independent project and is not affiliated with National Rail, Network Rail, or any train operating company.</p>
+
+    <p style="margin-bottom: 0;">Design inspired by the bold, optimistic travel posters of 1930s&ndash;50s British Railways.</p>
+</div>
+
+<div style="text-align: center; margin-top: 2rem;">
+    <a href="/" class="btn btn-primary">Plan a Journey</a>
+</div>
+
+<div class="illustration-placeholder" style="max-width: 600px;">
+    <img src="/static/see_britain_by_rail.jpg" alt="A 1930s-style poster showing Great Britain with stylised rail routes radiating from a central city. On the left of the image is the Giant's Causeway. On the right is a shoreline featuring white cliffs. At the bottom-right is a simplified compass rose. The slogan 'See Britain by Rail' is along the bottom of the image.">
+</div>
+{% endblock %}

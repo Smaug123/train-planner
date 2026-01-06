@@ -1,0 +1,114 @@
+{
+  "generatedAt": "2026-01-03T14:40:00Z",
+  "locationName": "Reading",
+  "crs": "RDG",
+  "platformAvailable": true,
+  "areServicesAvailable": true,
+  "trainServices": [
+    {
+      "serviceID": "rdg_service_1",
+      "rsid": "GW123400",
+      "sta": "14:40",
+      "eta": "On time",
+      "std": "14:42",
+      "etd": "On time",
+      "platform": "7",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Bristol Temple Meads", "crs": "BRI"}
+      ],
+      "previousCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "London Paddington", "crs": "PAD", "st": "14:15", "at": "14:15"}
+          ]
+        }
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Swindon", "crs": "SWI", "st": "15:05", "et": "On time"},
+            {"locationName": "Bristol Parkway", "crs": "BPW", "st": "15:35", "et": "On time"},
+            {"locationName": "Bristol Temple Meads", "crs": "BRI", "st": "15:45", "et": "On time"}
+          ]
+        }
+      ]
+    },
+    {
+      "serviceID": "rdg_service_2",
+      "rsid": "GW456700",
+      "sta": "14:55",
+      "eta": "14:57",
+      "std": "14:58",
+      "etd": "14:59",
+      "platform": "4",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Oxford", "crs": "OXF"}
+      ],
+      "previousCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "London Paddington", "crs": "PAD", "st": "14:30", "at": "14:30"}
+          ]
+        }
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Didcot Parkway", "crs": "DID", "st": "15:10", "et": "15:12"},
+            {"locationName": "Oxford", "crs": "OXF", "st": "15:30", "et": "15:32"}
+          ]
+        }
+      ]
+    },
+    {
+      "serviceID": "rdg_service_3",
+      "rsid": "XC200100",
+      "sta": "14:50",
+      "eta": "On time",
+      "std": "14:52",
+      "etd": "On time",
+      "platform": "12",
+      "operator": "CrossCountry",
+      "operatorCode": "XC",
+      "isCancelled": false,
+      "serviceType": "train",
+      "origin": [
+        {"locationName": "Birmingham New Street", "crs": "BHM"}
+      ],
+      "destination": [
+        {"locationName": "Brighton", "crs": "BTN"}
+      ],
+      "previousCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Birmingham New Street", "crs": "BHM", "st": "13:10", "at": "13:10"},
+            {"locationName": "Banbury", "crs": "BAN", "st": "13:50", "at": "13:50"},
+            {"locationName": "Oxford", "crs": "OXF", "st": "14:15", "at": "14:15"}
+          ]
+        }
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Gatwick Airport", "crs": "GTW", "st": "15:40", "et": "On time"},
+            {"locationName": "Brighton", "crs": "BTN", "st": "16:00", "et": "On time"}
+          ]
+        }
+      ]
+    }
+  ]
+}

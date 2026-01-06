@@ -29,7 +29,9 @@
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
-            (craneLib.filterCargoSources path type);
+            (craneLib.filterCargoSources path type)
+            || (builtins.match ".*\.html$" path != null)
+            || (builtins.match ".*\.json$" path != null);
         };
 
         commonBuildInputs = with pkgs; [

@@ -1,0 +1,105 @@
+{
+  "generatedAt": "2026-01-03T15:05:00Z",
+  "locationName": "Swindon",
+  "crs": "SWI",
+  "platformAvailable": true,
+  "areServicesAvailable": true,
+  "trainServices": [
+    {
+      "serviceID": "swi_service_1",
+      "rsid": "GW123400",
+      "sta": "15:05",
+      "eta": "On time",
+      "std": "15:07",
+      "etd": "On time",
+      "platform": "1",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Bristol Temple Meads", "crs": "BRI"}
+      ],
+      "previousCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "London Paddington", "crs": "PAD", "st": "14:15", "at": "14:15"},
+            {"locationName": "Reading", "crs": "RDG", "st": "14:40", "at": "14:42"}
+          ]
+        }
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Bristol Parkway", "crs": "BPW", "st": "15:35", "et": "On time"},
+            {"locationName": "Bristol Temple Meads", "crs": "BRI", "st": "15:45", "et": "On time"}
+          ]
+        }
+      ]
+    },
+    {
+      "serviceID": "swi_service_2",
+      "rsid": "GW789000",
+      "sta": "15:35",
+      "eta": "On time",
+      "std": "15:37",
+      "etd": "On time",
+      "platform": "2",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "origin": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "destination": [
+        {"locationName": "Cardiff Central", "crs": "CDF"}
+      ],
+      "previousCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "London Paddington", "crs": "PAD", "st": "14:45", "at": "14:45"},
+            {"locationName": "Reading", "crs": "RDG", "st": "15:10", "at": "15:12"}
+          ]
+        }
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Bristol Parkway", "crs": "BPW", "st": "16:05", "et": "On time"},
+            {"locationName": "Newport (South Wales)", "crs": "NWP", "st": "16:25", "et": "On time"},
+            {"locationName": "Cardiff Central", "crs": "CDF", "st": "16:40", "et": "On time"}
+          ]
+        }
+      ]
+    },
+    {
+      "serviceID": "swi_service_3",
+      "rsid": "GW555600",
+      "std": "15:20",
+      "etd": "On time",
+      "platform": "3",
+      "operator": "Great Western Railway",
+      "operatorCode": "GW",
+      "isCancelled": false,
+      "serviceType": "train",
+      "origin": [
+        {"locationName": "Swindon", "crs": "SWI"}
+      ],
+      "destination": [
+        {"locationName": "London Paddington", "crs": "PAD"}
+      ],
+      "subsequentCallingPoints": [
+        {
+          "callingPoint": [
+            {"locationName": "Reading", "crs": "RDG", "st": "15:45", "et": "On time"},
+            {"locationName": "London Paddington", "crs": "PAD", "st": "16:10", "et": "On time"}
+          ]
+        }
+      ]
+    }
+  ]
+}

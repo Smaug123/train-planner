@@ -1,0 +1,414 @@
+{% extends "base.html" %}
+
+{% block title %}Continuing Journey Planner{% endblock %}
+
+{% block content %}
+<div class="search-panel">
+    <div class="mode-toggle">
+        <button type="button" class="mode-toggle-btn active" data-mode="identify">Already on a Train?</button>
+        <button type="button" class="mode-toggle-btn" data-mode="search">Search by Departure</button>
+    </div>
+
+    <div id="identify-mode" class="search-mode active">
+        <form id="identify-form" action="/identify" method="GET">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="next_station">Next Stop</label>
+                    <div class="autocomplete-wrapper">
+                        <input type="text" id="next_station" name="next_station"
+                               placeholder="e.g. WDB or Woodbridge"
+                               required
+                               autocomplete="off"
+                               data-autocomplete="station">
+                        <div class="autocomplete-dropdown" data-for="next_station"></div>
+                    </div>
+                    <p class="hint">The next station your train will call at</p>
+                </div>
+
+                <div class="form-group">
+                    <label for="terminus">Terminates At (Optional)</label>
+                    <div class="autocomplete-wrapper">
+                        <input type="text" id="terminus" name="terminus"
+                               placeholder="e.g. IPS or Ipswich"
+                               autocomplete="off"
+                               data-autocomplete="station">
+                        <div class="autocomplete-dropdown" data-for="terminus"></div>
+                    </div>
+                    <p class="hint">Where your train terminates</p>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">
+                Identify My Train
+            </button>
+        </form>
+    </div>
+
+    <div id="search-mode" class="search-mode">
+        <form id="search-form" action="/search/service" method="GET">
+            <div class="form-group">
+                <label for="origin">Departed From</label>
+                <div class="autocomplete-wrapper">
+                    <input type="text" id="origin" name="origin"
+                           placeholder="e.g. PAD or London Paddington"
+                           required
+                           autocomplete="off"
+                           data-autocomplete="station">
+                    <div class="autocomplete-dropdown" data-for="origin"></div>
+                </div>
+                <p class="hint">Enter a station code (3 letters) or name</p>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="headcode">Headcode (Optional)</label>
+                    <input type="text" id="headcode" name="headcode"
+                           placeholder="e.g. 1A23"
+                           pattern="[0-9][A-Za-z][0-9]{2}"
+                           maxlength="4"
+                           autocomplete="off">
+                </div>
+
+                <div class="form-group">
+                    <label for="dep_time">Departure Time</label>
+                    <input type="time" id="dep_time" name="time">
+                </div>
+            </div>
+
+            <p class="hint">Provide headcode or departure time to narrow down results. If both are given, headcode takes priority.</p>
+
+            <div class="form-group">
+                <label for="destination">Final Destination (Optional)</label>
+                <div class="autocomplete-wrapper">
+                    <input type="text" id="destination" name="destination"
+                           placeholder="e.g. BRI or Bristol Temple Meads"
+                           autocomplete="off"
+                           data-autocomplete="station">
+                    <div class="autocomplete-dropdown" data-for="destination"></div>
+                </div>
+                <p class="hint">Enter your final destination to filter services</p>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">
+                Find Service
+            </button>
+        </form>
+    </div>
+</div>
+
+<div id="results-container">
+    <!-- Search results will be inserted here -->
+</div>
+
+<div class="poster-banner">
+    <p>Where will the railway take you today?</p>
+</div>
+
+<div class="illustration-placeholder">
+    <img src="/static/optimistic_train.png" alt="A 1930s-style poster illustration of a streamlined locomotive emerging from green countryside hills, running alongside a river, with an idyllic village church in the distance, and two people waving at the train from the foreground.">
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    'use strict';
+
+    const searchForm = document.getElementById('search-form');
+    const identifyForm = document.getElementById('identify-form');
+    const resultsContainer = document.getElementById('results-container');
+
+    // Mode toggle handling
+    const modeToggleBtns = document.querySelectorAll('.mode-toggle-btn');
+    const identifyMode = document.getElementById('identify-mode');
+    const searchMode = document.getElementById('search-mode');
+
+    modeToggleBtns.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            const mode = btn.dataset.mode;
+
+            // Update button states
+            modeToggleBtns.forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+
+            // Show/hide modes
+            if (mode === 'identify') {
+                identifyMode.classList.add('active');
+                searchMode.classList.remove('active');
+            } else {
+                searchMode.classList.add('active');
+                identifyMode.classList.remove('active');
+            }
+        });
+    });
+
+    // ========================================
+    // STATION AUTOCOMPLETE
+    // ========================================
+
+    // Track active autocomplete state per input
+    const autocompleteState = new Map();
+
+    // Debounce helper
+    function debounce(fn, delay) {
+        let timer = null;
+        return function() {
+            const args = arguments;
+            const context = this;
+            clearTimeout(timer);
+            timer = setTimeout(function() {
+                fn.apply(context, args);
+            }, delay);
+        };
+    }
+
+    // Fetch station suggestions
+    async function fetchStations(query) {
+        if (!query || query.length < 1) return [];
+        try {
+            const response = await fetch('/api/stations/search?q=' + encodeURIComponent(query) + '&limit=8');
+            if (!response.ok) return [];
+            const data = await response.json();
+            return data.stations || [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    // Render dropdown items
+    function renderDropdown(dropdown, stations, selectedIndex) {
+        dropdown.innerHTML = stations.map(function(station, idx) {
+            const selectedClass = idx === selectedIndex ? ' selected' : '';
+            return '<div class="autocomplete-item' + selectedClass + '" data-crs="' + station.crs + '" data-name="' + station.name.replace(/"/g, '&quot;') + '">' +
+                '<span class="autocomplete-crs">' + station.crs + '</span>' +
+                '<span class="autocomplete-station-name">(' + station.name + ')</span>' +
+                '</div>';
+        }).join('');
+    }
+
+    // Close all dropdowns
+    function closeAllDropdowns() {
+        document.querySelectorAll('.autocomplete-dropdown').forEach(function(dd) {
+            dd.innerHTML = '';
+        });
+        autocompleteState.clear();
+    }
+
+    // Handle input on autocomplete fields
+    const handleInput = debounce(async function(e) {
+        const input = e.target;
+        const inputId = input.id;
+        const dropdown = document.querySelector('.autocomplete-dropdown[data-for="' + inputId + '"]');
+        if (!dropdown) return;
+
+        const query = input.value.trim();
+
+        // Clear dropdown if query is too short
+        if (query.length < 1) {
+            dropdown.innerHTML = '';
+            autocompleteState.delete(inputId);
+            return;
+        }
+
+        // Fetch and display suggestions
+        const stations = await fetchStations(query);
+        autocompleteState.set(inputId, { stations: stations, selectedIndex: -1 });
+        renderDropdown(dropdown, stations, -1);
+    }, 150);
+
+    // Handle keyboard navigation
+    function handleKeydown(e) {
+        const input = e.target;
+        const inputId = input.id;
+        const dropdown = document.querySelector('.autocomplete-dropdown[data-for="' + inputId + '"]');
+        if (!dropdown) return;
+
+        const state = autocompleteState.get(inputId);
+        if (!state || state.stations.length === 0) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            state.selectedIndex = Math.min(state.selectedIndex + 1, state.stations.length - 1);
+            renderDropdown(dropdown, state.stations, state.selectedIndex);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            state.selectedIndex = Math.max(state.selectedIndex - 1, -1);
+            renderDropdown(dropdown, state.stations, state.selectedIndex);
+        } else if (e.key === 'Enter' && state.selectedIndex >= 0) {
+            e.preventDefault();
+            const selected = state.stations[state.selectedIndex];
+            input.value = selected.crs + ' (' + selected.name + ')';
+            dropdown.innerHTML = '';
+            autocompleteState.delete(inputId);
+        } else if (e.key === 'Escape') {
+            dropdown.innerHTML = '';
+            autocompleteState.delete(inputId);
+        }
+    }
+
+    // Handle click on dropdown item
+    function handleDropdownClick(e) {
+        const item = e.target.closest('.autocomplete-item');
+        if (!item) return;
+
+        const dropdown = item.closest('.autocomplete-dropdown');
+        const inputId = dropdown.dataset.for;
+        const input = document.getElementById(inputId);
+        if (!input) return;
+
+        input.value = item.dataset.crs + ' (' + item.dataset.name + ')';
+        dropdown.innerHTML = '';
+        autocompleteState.delete(inputId);
+        input.focus();
+    }
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.autocomplete-wrapper')) {
+            closeAllDropdowns();
+        }
+    });
+
+    // Initialize autocomplete on all station inputs
+    document.querySelectorAll('input[data-autocomplete="station"]').forEach(function(input) {
+        input.addEventListener('input', handleInput);
+        input.addEventListener('keydown', handleKeydown);
+    });
+
+    // Handle clicks on dropdown items
+    document.querySelectorAll('.autocomplete-dropdown').forEach(function(dropdown) {
+        dropdown.addEventListener('click', handleDropdownClick);
+    });
+
+    // ========================================
+    // FORM SUBMISSION
+    // ========================================
+
+    // Extract CRS code from display value like "WDB (Woodbridge)"
+    function extractCrs(value) {
+        const trimmed = value.trim();
+        // If it contains a space, take the first word (the CRS code)
+        const spaceIdx = trimmed.indexOf(' ');
+        if (spaceIdx > 0) {
+            return trimmed.substring(0, spaceIdx).toUpperCase();
+        }
+        return trimmed.toUpperCase();
+    }
+
+    // Generic form submission handler
+    function submitForm(form, endpoint, loadingMessage) {
+        // Close any open dropdowns
+        closeAllDropdowns();
+
+        const formData = new FormData(form);
+        const params = new URLSearchParams();
+
+        // Fields that contain station codes (may have display names appended)
+        const stationFields = ['origin', 'destination', 'next_station', 'terminus'];
+
+        // Only add non-empty values
+        for (const [key, value] of formData.entries()) {
+            if (value.trim()) {
+                if (stationFields.includes(key)) {
+                    params.append(key, extractCrs(value));
+                } else {
+                    params.append(key, value.trim().toUpperCase());
+                }
+            }
+        }
+
+        // Show loading state
+        resultsContainer.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p class="loading-text">' + loadingMessage + '</p></div>';
+
+        // Fetch results
+        fetch(endpoint + '?' + params.toString(), {
+            headers: {
+                'Accept': 'text/html'
+            }
+        })
+        .then(function(response) {
+            if (!response.ok) {
+                throw new Error('Request failed');
+            }
+            return response.text();
+        })
+        .then(function(html) {
+            resultsContainer.innerHTML = html;
+            initializeCallingPointToggles();
+        })
+        .catch(function(error) {
+            resultsContainer.innerHTML = '<div class="error-message"><h3>Request Failed</h3><p>Unable to fetch results. Please check your input and try again.</p></div>';
+        });
+    }
+
+    // Handle identify form submission
+    identifyForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitForm(identifyForm, '/identify', 'Identifying your train...');
+    });
+
+    // Handle search form submission
+    searchForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitForm(searchForm, '/search/service', 'Searching for services...');
+    });
+
+    // Initialize calling point toggles for dynamically loaded content
+    function initializeCallingPointToggles() {
+        document.querySelectorAll('.calling-points-toggle').forEach(function(toggle) {
+            toggle.addEventListener('click', function() {
+                const list = toggle.nextElementSibling;
+                toggle.classList.toggle('expanded');
+                list.classList.toggle('visible');
+            });
+        });
+    }
+
+    // Handle position selection for journey planning
+    document.addEventListener('click', function(e) {
+        if (e.target.classList.contains('select-position-btn')) {
+            const btn = e.target;
+            const serviceId = btn.dataset.serviceId;
+            const positionIdx = btn.dataset.positionIdx;
+            const boardStation = btn.dataset.boardStation;
+
+            // Show destination prompt
+            const destination = prompt('Enter your final destination (station code or name):');
+            if (!destination) return;
+
+            // Show loading
+            resultsContainer.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p class="loading-text">Planning your journey...</p></div>';
+
+            // Submit journey plan request
+            fetch('/journey/plan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/html'
+                },
+                body: JSON.stringify({
+                    service_id: serviceId,
+                    position: parseInt(positionIdx),
+                    destination: destination.trim(),
+                    board_station: boardStation
+                })
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    return response.text().then(function(text) {
+                        throw new Error(text);
+                    });
+                }
+                return response.text();
+            })
+            .then(function(html) {
+                resultsContainer.innerHTML = html;
+            })
+            .catch(function(error) {
+                resultsContainer.innerHTML = '<div class="error-message"><h3>Planning Failed</h3><p>' + (error.message || 'Unable to plan journey. Please try again.') + '</p></div>';
+            });
+        }
+    });
+})();
+</script>
+{% endblock %}
