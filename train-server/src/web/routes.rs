@@ -22,7 +22,9 @@ use super::state::AppState;
 use super::templates::*;
 
 /// Create the application router.
-pub fn create_router(state: AppState) -> Router {
+///
+/// `static_dir` is the path to the static assets directory.
+pub fn create_router(state: AppState, static_dir: &str) -> Router {
     Router::new()
         .route("/", get(index_page))
         .route("/health", get(health))
@@ -31,10 +33,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/search/service", get(search_service))
         .route("/identify", get(identify_train))
         .route("/journey/plan", post(plan_journey))
-        .nest_service(
-            "/static",
-            ServeDir::new("train-server/static").fallback(ServeDir::new("static")),
-        )
+        .nest_service("/static", ServeDir::new(static_dir))
         .with_state(state)
 }
 

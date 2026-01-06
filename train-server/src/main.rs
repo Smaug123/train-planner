@@ -145,8 +145,12 @@ async fn main() {
     // Build app state
     let state = AppState::new(cached_darwin, walkable, search_config, station_names);
 
+    // Get static directory path (defaults to development path)
+    let static_dir =
+        std::env::var("STATIC_DIR").unwrap_or_else(|_| "train-server/static".to_string());
+
     // Create router
-    let app = create_router(state);
+    let app = create_router(state, &static_dir);
 
     // Bind and serve
     let addr: SocketAddr = std::env::var("LISTEN_ADDR")
