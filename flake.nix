@@ -42,6 +42,7 @@
 
         commonNativeBuildInputs = with pkgs; [
           pkg-config
+          makeWrapper
         ];
 
         commonArgs = {
