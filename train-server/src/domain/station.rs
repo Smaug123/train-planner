@@ -56,6 +56,32 @@ impl Crs {
         Ok(Crs([bytes[0], bytes[1], bytes[2]]))
     }
 
+    /// Parse a CRS code from user input, normalizing to uppercase.
+    ///
+    /// This is the preferred method for parsing user-provided input,
+    /// as it accepts both "KGX" and "kgx".
+    pub fn parse_normalized(s: &str) -> Result<Self, InvalidCrs> {
+        let bytes = s.as_bytes();
+
+        if bytes.len() != 3 {
+            return Err(InvalidCrs {
+                reason: "must be exactly 3 characters",
+            });
+        }
+
+        let mut arr = [0u8; 3];
+        for (i, &b) in bytes.iter().enumerate() {
+            if !b.is_ascii_alphabetic() {
+                return Err(InvalidCrs {
+                    reason: "must be ASCII letters A-Z",
+                });
+            }
+            arr[i] = b.to_ascii_uppercase();
+        }
+
+        Ok(Crs(arr))
+    }
+
     /// Returns the CRS code as a string slice.
     pub fn as_str(&self) -> &str {
         // SAFETY: We only store valid ASCII uppercase letters
@@ -93,6 +119,22 @@ mod tests {
         assert!(Crs::parse("kgx").is_err());
         assert!(Crs::parse("Kgx").is_err());
         assert!(Crs::parse("KGx").is_err());
+    }
+
+    #[test]
+    fn parse_normalized_accepts_lowercase() {
+        let kgx = Crs::parse_normalized("kgx").unwrap();
+        assert_eq!(kgx.as_str(), "KGX");
+
+        let mixed = Crs::parse_normalized("KgX").unwrap();
+        assert_eq!(mixed.as_str(), "KGX");
+    }
+
+    #[test]
+    fn parse_normalized_rejects_invalid() {
+        assert!(Crs::parse_normalized("k1x").is_err());
+        assert!(Crs::parse_normalized("kg").is_err());
+        assert!(Crs::parse_normalized("kgxx").is_err());
     }
 
     #[test]
