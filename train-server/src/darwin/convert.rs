@@ -1172,4 +1172,81 @@ mod fixed_behavior_tests {
         assert_eq!(converted.service.calls[2].station.as_str(), "SRA");
         assert_eq!(converted.service.calls[3].station.as_str(), "LST");
     }
+
+    /// Golden test: convert real Elizabeth Line service from Whitechapel.
+    /// Verifies that intermediate stops (which only have departure times in Darwin)
+    /// are correctly converted and have usable departure times for journey planning.
+    #[test]
+    fn golden_convert_elizabeth_line_whitechapel() {
+        use crate::darwin::types::StationBoardWithDetails;
+        use chrono::NaiveDate;
+
+        let json = include_str!("../../tests/fixtures/elizabeth_line_zlw_departures.json");
+        let board: StationBoardWithDetails =
+            serde_json::from_str(json).expect("Failed to parse Elizabeth Line golden test fixture");
+
+        let board_crs = Crs::parse("ZLW").unwrap();
+        let board_date = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
+
+        // Find Elizabeth Line to Paddington
+        let services = board.train_services.unwrap();
+        let elizabeth_to_pad = services
+            .iter()
+            .find(|s| {
+                s.operator_code.as_deref() == Some("XR")
+                    && s.destination
+                        .as_ref()
+                        .is_some_and(|d| d.iter().any(|loc| loc.crs == "PAD"))
+            })
+            .expect("Should have Elizabeth Line to PAD");
+
+        // Convert the service
+        let result = convert_service_item(elizabeth_to_pad, &board_crs, "Whitechapel", board_date);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+
+        let converted = result.unwrap();
+
+        // Service should have all calling points: ZLW (board) + 5 subsequent
+        // (LST, ZFD, TCR, BDS, PAD)
+        assert!(
+            converted.service.calls.len() >= 6,
+            "Should have at least 6 calls (board + 5 subsequent), got {}",
+            converted.service.calls.len()
+        );
+
+        // Board station should be first (no previous calling points for this service)
+        assert_eq!(
+            converted.service.calls[0].station.as_str(),
+            "ZLW",
+            "First call should be Whitechapel"
+        );
+        assert_eq!(converted.service.board_station_idx.0, 0);
+
+        // Intermediate stops should have departure times (for journey planning)
+        // Find Farringdon
+        let farringdon = converted
+            .service
+            .calls
+            .iter()
+            .find(|c| c.station.as_str() == "ZFD")
+            .expect("Should have Farringdon");
+
+        assert!(
+            farringdon.booked_departure.is_some(),
+            "Farringdon should have departure time"
+        );
+        // Intermediate stops don't have arrival times in Darwin
+        assert!(
+            farringdon.booked_arrival.is_none(),
+            "Intermediate stop shouldn't have arrival time (Darwin limitation)"
+        );
+
+        // Terminus (PAD) should have arrival time
+        let paddington = converted.service.calls.last().expect("Should have calls");
+        assert_eq!(paddington.station.as_str(), "PAD");
+        assert!(
+            paddington.booked_arrival.is_some(),
+            "Terminus should have arrival time"
+        );
+    }
 }

@@ -141,10 +141,15 @@ impl SearchState {
         for idx in (request.current_position.0 + 1)..service.calls.len() {
             let call = &service.calls[idx];
 
-            // Need arrival time at this stop
-            let arrival_time = match call.expected_arrival() {
+            // Need arrival time at this stop. Darwin only provides departure times for
+            // intermediate calling points (arrival is typically 1-2 mins earlier but
+            // not exposed), so fall back to departure time if arrival isn't available.
+            let arrival_time = match call
+                .expected_arrival()
+                .or_else(|| call.expected_departure())
+            {
                 Some(t) => t,
-                None => continue, // Skip stops without arrival times
+                None => continue, // Skip stops without any time
             };
 
             // Create the leg from current position to this stop
@@ -444,7 +449,11 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                 continue;
             }
 
-            let arrival_time = match call.expected_arrival() {
+            // Fall back to departure time if arrival isn't available (see initial_states)
+            let arrival_time = match call
+                .expected_arrival()
+                .or_else(|| call.expected_departure())
+            {
                 Some(t) => t,
                 None => continue,
             };
@@ -872,6 +881,65 @@ mod tests {
         let result = planner.search(&request).unwrap();
 
         assert!(result.journeys.is_empty());
+    }
+
+    #[test]
+    fn intermediate_stops_with_only_departure_times() {
+        // Simulates Elizabeth Line / Darwin behavior where intermediate calling points
+        // only have departure times (no arrival times). The search should still generate
+        // initial states for these stops by falling back to departure time.
+        //
+        // Route: ZLW -> LST -> ZFD -> PAD (terminus)
+        // Only ZFD has a connection to CTK (destination)
+        let mut zlw = Call::new(crs("ZLW"), "Whitechapel".into());
+        zlw.booked_departure = Some(time("23:00"));
+
+        let mut lst = Call::new(crs("LST"), "Liverpool Street".into());
+        lst.booked_departure = Some(time("23:05")); // No arrival time!
+
+        let mut zfd = Call::new(crs("ZFD"), "Farringdon".into());
+        zfd.booked_departure = Some(time("23:08")); // No arrival time!
+
+        let mut pad = Call::new(crs("PAD"), "Paddington".into());
+        pad.booked_arrival = Some(time("23:20")); // Terminus has arrival
+
+        let current = Arc::new(Service {
+            service_ref: ServiceRef::new("ELIZ1".into(), crs("ZLW")),
+            headcode: None,
+            operator: "Elizabeth Line".into(),
+            operator_code: None,
+            calls: vec![zlw, lst, zfd, pad],
+            board_station_idx: CallIndex(0),
+        });
+
+        // Connection from ZFD to CTK (Thameslink)
+        let connection = make_service(
+            "TL1",
+            "ZFD",
+            &[
+                ("ZFD", "Farringdon", "", "23:15"),
+                ("CTK", "City Thameslink", "23:18", ""),
+            ],
+        );
+
+        let provider = MockProvider::new(vec![connection]);
+        let walkable = WalkableConnections::new();
+        let config = SearchConfig::default();
+
+        let planner = Planner::new(&provider, &walkable, &config);
+
+        // User at ZLW (position 0), wants CTK
+        let request = SearchRequest::new(current, CallIndex(0), crs("CTK"));
+        let result = planner.search(&request).unwrap();
+
+        // Should find the journey: ZLW->ZFD (Elizabeth Line) + ZFD->CTK (Thameslink)
+        assert!(
+            !result.journeys.is_empty(),
+            "Should find journey via Farringdon even though intermediate stops lack arrival times"
+        );
+        let journey = &result.journeys[0];
+        assert_eq!(journey.change_count(), 1);
+        assert_eq!(journey.arrival_time(), time("23:18"));
     }
 }
 
