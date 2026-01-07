@@ -179,15 +179,36 @@
     function renderDropdown(dropdown, stations, selectedIndex) {
         dropdown.innerHTML = stations.map(function(station, idx) {
             const selectedClass = idx === selectedIndex ? ' selected' : '';
-            return '<div class="autocomplete-item' + selectedClass + '" data-crs="' + station.crs + '" data-name="' + station.name.replace(/"/g, '&quot;') + '">' +
+            return '<div class="autocomplete-item' + selectedClass + '" tabindex="0" data-crs="' + station.crs + '" data-name="' + station.name.replace(/"/g, '&quot;') + '">' +
                 '<span class="autocomplete-crs">' + station.crs + '</span>' +
                 '<span class="autocomplete-station-name">(' + station.name + ')</span>' +
                 '</div>';
         }).join('');
     }
 
-    // Close all dropdowns
+    // Try to auto-select if input value is a valid 3-letter CRS code
+    function tryAutoSelect(input, state) {
+        if (!state || state.stations.length === 0) return;
+
+        const query = input.value.trim().toUpperCase();
+        if (query.length !== 3) return;
+
+        const match = state.stations.find(function(s) {
+            return s.crs === query;
+        });
+        if (match) {
+            input.value = match.crs + ' (' + match.name + ')';
+        }
+    }
+
+    // Close all dropdowns (with auto-select for any valid CRS codes)
     function closeAllDropdowns() {
+        autocompleteState.forEach(function(state, inputId) {
+            const input = document.getElementById(inputId);
+            if (input) {
+                tryAutoSelect(input, state);
+            }
+        });
         document.querySelectorAll('.autocomplete-dropdown').forEach(function(dd) {
             dd.innerHTML = '';
         });
@@ -275,9 +296,74 @@
         input.addEventListener('keydown', handleKeydown);
     });
 
-    // Handle clicks on dropdown items
+    // Handle clicks and keyboard on dropdown items
     document.querySelectorAll('.autocomplete-dropdown').forEach(function(dropdown) {
         dropdown.addEventListener('click', handleDropdownClick);
+        dropdown.addEventListener('keydown', function(e) {
+            const item = e.target.closest('.autocomplete-item');
+            if (!item) return;
+
+            const items = Array.from(dropdown.querySelectorAll('.autocomplete-item'));
+            const currentIndex = items.indexOf(item);
+            const inputId = dropdown.dataset.for;
+            const input = document.getElementById(inputId);
+
+            if (e.key === 'Tab') {
+                // Tab should leave the dropdown entirely, not move between items
+                // The focusout handler will take care of auto-select
+                // Remove tabindex temporarily so Tab skips remaining items
+                items.forEach(function(i) { i.removeAttribute('tabindex'); });
+                // Focus will naturally move to next focusable element
+            } else if (e.key === 'ArrowDown' && currentIndex < items.length - 1) {
+                e.preventDefault();
+                items[currentIndex + 1].focus();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (currentIndex > 0) {
+                    items[currentIndex - 1].focus();
+                } else if (input) {
+                    input.focus();
+                }
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (input) {
+                    input.value = item.dataset.crs + ' (' + item.dataset.name + ')';
+                    dropdown.innerHTML = '';
+                    autocompleteState.delete(inputId);
+                    input.focus();
+                }
+            } else if (e.key === 'Escape') {
+                dropdown.innerHTML = '';
+                autocompleteState.delete(inputId);
+                if (input) input.focus();
+            }
+        });
+    });
+
+    // Auto-select when focus leaves the autocomplete wrapper entirely
+    document.querySelectorAll('.autocomplete-wrapper').forEach(function(wrapper) {
+        wrapper.addEventListener('focusout', function(e) {
+            // Check if focus is moving to something still inside this wrapper
+            if (e.relatedTarget && wrapper.contains(e.relatedTarget)) {
+                return;
+            }
+
+            // Focus is leaving the wrapper entirely - auto-select and close
+            // Small delay to handle edge cases with click handlers
+            setTimeout(function() {
+                const input = wrapper.querySelector('input[data-autocomplete="station"]');
+                if (!input) return;
+
+                const inputId = input.id;
+                const state = autocompleteState.get(inputId);
+                if (state) {
+                    tryAutoSelect(input, state);
+                    const dropdown = wrapper.querySelector('.autocomplete-dropdown');
+                    if (dropdown) dropdown.innerHTML = '';
+                    autocompleteState.delete(inputId);
+                }
+            }, 50);
+        });
     });
 
     // ========================================
