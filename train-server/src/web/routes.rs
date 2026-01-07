@@ -433,7 +433,7 @@ async fn plan_journey(
     // Run the planner
     let planner = Planner::new(&provider, &state.walkable, &state.config);
     let result = planner
-        .search(&search_request)
+        .search(&search_request, None)
         .await
         .map_err(AppError::from)?;
 

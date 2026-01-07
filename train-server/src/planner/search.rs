@@ -6,6 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::domain::{CallIndex, Crs, Journey, Leg, RailTime, Segment, Service, Walk};
@@ -13,6 +14,12 @@ use crate::walkable::WalkableConnections;
 
 use super::config::SearchConfig;
 use super::rank::{deduplicate, rank_journeys, remove_dominated};
+
+/// Maximum routes to explore before terminating search.
+const MAX_ROUTES: usize = 10_000;
+
+/// Interval at which to send progress updates.
+const PROGRESS_INTERVAL: usize = 100;
 
 /// Error from journey search.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -95,6 +102,21 @@ impl SearchResult {
             routes_explored: 0,
         }
     }
+}
+
+/// Progress update during search.
+///
+/// Sent periodically through the progress channel if one is provided.
+#[derive(Debug, Clone)]
+pub struct SearchProgress {
+    /// Number of routes explored so far.
+    pub routes_explored: usize,
+    /// Maximum routes before search terminates.
+    pub max_routes: usize,
+    /// Number of journeys found so far.
+    pub journeys_found: usize,
+    /// Current queue size (pending states to explore).
+    pub queue_size: usize,
 }
 
 /// Trait for providing departure services.
@@ -206,12 +228,20 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
     }
 
     /// Search for journeys from current position to destination.
-    #[instrument(skip(self, request), fields(
+    ///
+    /// If a progress channel is provided, sends periodic updates during the search.
+    /// The channel is unbounded; callers should use `mpsc::unbounded_channel()`.
+    /// Progress updates are sent approximately every 100 routes explored.
+    #[instrument(skip(self, request, progress), fields(
         destination = %request.destination.as_str(),
         current_position = request.current_position.0,
         service_id = %request.current_service.service_ref.darwin_id
     ))]
-    pub async fn search(&self, request: &SearchRequest) -> Result<SearchResult, SearchError> {
+    pub async fn search(
+        &self,
+        request: &SearchRequest,
+        progress: Option<mpsc::UnboundedSender<SearchProgress>>,
+    ) -> Result<SearchResult, SearchError> {
         info!(
             terminus = %request.current_service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
             "Starting journey search"
@@ -247,6 +277,18 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
 
         while let Some(state) = queue.pop_front() {
             routes_explored += 1;
+
+            // Send progress update periodically
+            if routes_explored % PROGRESS_INTERVAL == 0
+                && let Some(ref tx) = progress
+            {
+                let _ = tx.send(SearchProgress {
+                    routes_explored,
+                    max_routes: MAX_ROUTES,
+                    journeys_found: journeys.len(),
+                    queue_size: queue.len(),
+                });
+            }
 
             // Check if at destination
             if state.at_destination(&request.destination) {
@@ -302,8 +344,8 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
             }
 
             // Limit total exploration
-            if routes_explored > 10000 {
-                warn!("Search terminated: exceeded 10000 routes explored");
+            if routes_explored > MAX_ROUTES {
+                warn!("Search terminated: exceeded {} routes explored", MAX_ROUTES);
                 break;
             }
 
@@ -636,7 +678,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("BRI"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         assert_eq!(result.journeys.len(), 1);
         assert_eq!(result.journeys[0].change_count(), 0);
@@ -664,7 +706,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(1), crs("BRI"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         assert_eq!(result.journeys.len(), 1);
         assert_eq!(result.journeys[0].departure_time(), time("10:27"));
@@ -700,7 +742,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("OXF"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         assert!(!result.journeys.is_empty());
         let journey = &result.journeys[0];
@@ -740,7 +782,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("YRK"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         assert!(!result.journeys.is_empty());
         let journey = &result.journeys[0];
@@ -766,7 +808,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(10), crs("BRI"));
-        let result = planner.search(&request).await;
+        let result = planner.search(&request, None).await;
 
         assert!(matches!(result, Err(SearchError::InvalidRequest(_))));
     }
@@ -790,7 +832,7 @@ mod tests {
 
         // Position at last stop - no subsequent stops
         let request = SearchRequest::new(current, CallIndex(1), crs("BRI"));
-        let result = planner.search(&request).await;
+        let result = planner.search(&request, None).await;
 
         assert!(matches!(result, Err(SearchError::InvalidRequest(_))));
     }
@@ -851,7 +893,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("FFF"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         // Should not find route to FFF (would need 4 changes)
         // But might find routes to intermediate stations
@@ -879,7 +921,7 @@ mod tests {
 
         // Destination not on current train and no connections
         let request = SearchRequest::new(current, CallIndex(0), crs("XXX"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         assert!(result.journeys.is_empty());
     }
@@ -931,7 +973,7 @@ mod tests {
 
         // User at ZLW (position 0), wants CTK
         let request = SearchRequest::new(current, CallIndex(0), crs("CTK"));
-        let result = planner.search(&request).await.unwrap();
+        let result = planner.search(&request, None).await.unwrap();
 
         // Should find the journey: ZLW->ZFD (Elizabeth Line) + ZFD->CTK (Thameslink)
         assert!(
@@ -987,7 +1029,7 @@ mod proptests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(planner.search(request))
+            .block_on(planner.search(request, None))
     }
 
     fn date() -> NaiveDate {
