@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use moka::future::Cache as MokaCache;
 
-use crate::darwin::{ConvertedService, DarwinClientImpl, DarwinError};
+use crate::darwin::{ConvertedService, DarwinClientImpl, DarwinError, ServiceDetails};
 use crate::domain::Crs;
 
 /// Board type: departures or arrivals.
@@ -226,6 +226,17 @@ impl CachedDarwinClient {
     /// Access the underlying client for operations that bypass cache.
     pub fn client(&self) -> &DarwinClientImpl {
         &self.client
+    }
+
+    /// Get full service details by service ID.
+    ///
+    /// This is not cached because it's a per-service lookup that's only needed
+    /// for arrivals-only services (set-down-only trains).
+    pub async fn get_service_details(
+        &self,
+        service_id: &str,
+    ) -> Result<ServiceDetails, DarwinError> {
+        self.client.get_service_details(service_id).await
     }
 
     /// Get cache statistics.

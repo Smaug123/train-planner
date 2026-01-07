@@ -6,6 +6,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
+use tracing::{debug, info, instrument, trace, warn};
+
 use crate::domain::{CallIndex, Crs, Journey, Leg, RailTime, Segment, Service, Walk};
 use crate::walkable::WalkableConnections;
 
@@ -199,7 +201,16 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
     }
 
     /// Search for journeys from current position to destination.
+    #[instrument(skip(self, request), fields(
+        destination = %request.destination.as_str(),
+        current_position = request.current_position.0,
+        service_id = %request.current_service.service_ref.darwin_id
+    ))]
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResult, SearchError> {
+        info!(
+            terminus = %request.current_service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
+            "Starting journey search"
+        );
         request.validate()?;
 
         // Check if destination is directly reachable on current train
@@ -208,11 +219,22 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
 
         // Check direct service to destination
         if let Some(journey) = self.check_direct(request) {
+            debug!("Direct route found on current train");
             journeys.push(journey);
+        } else {
+            debug!("No direct route on current train");
         }
 
         // Initialize BFS with states from alighting at each subsequent stop
         let initial_states = SearchState::initial_states(request);
+        debug!(initial_states = initial_states.len(), "Starting BFS");
+        for state in &initial_states {
+            trace!(
+                station = %state.station.as_str(),
+                time = %state.time,
+                "Initial alighting point"
+            );
+        }
         let mut queue: VecDeque<SearchState> = initial_states.into();
 
         // Track visited (station, time bucket) to avoid redundant exploration
@@ -224,6 +246,11 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
             // Check if at destination
             if state.at_destination(&request.destination) {
                 if let Some(journey) = state.to_journey() {
+                    debug!(
+                        changes = journey.change_count(),
+                        arrival = %journey.arrival_time(),
+                        "Found journey to destination"
+                    );
                     journeys.push(journey);
                 }
                 continue;
@@ -231,6 +258,11 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
 
             // Pruning: check max changes
             if state.changes >= self.config.max_changes {
+                trace!(
+                    station = %state.station.as_str(),
+                    changes = state.changes,
+                    "Pruned: max changes exceeded"
+                );
                 continue;
             }
 
@@ -246,25 +278,49 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                     .unwrap_or(state.time),
             );
             if journey_so_far > self.config.max_journey() {
+                trace!(
+                    station = %state.station.as_str(),
+                    duration = ?journey_so_far,
+                    "Pruned: max journey time exceeded"
+                );
                 continue;
             }
 
             // Deduplicate by (station, time bucket)
             let time_bucket = state.time.to_datetime().and_utc().timestamp() / 300; // 5-min buckets
             if !visited.insert((state.station, time_bucket)) {
+                trace!(
+                    station = %state.station.as_str(),
+                    "Pruned: already visited this station/time"
+                );
                 continue;
             }
 
             // Limit total exploration
             if routes_explored > 10000 {
+                warn!("Search terminated: exceeded 10000 routes explored");
                 break;
             }
 
             // Get departures from this station
             let min_departure = state.time + self.config.min_connection();
+            debug!(
+                station = %state.station.as_str(),
+                time = %state.time,
+                min_departure = %min_departure,
+                changes = state.changes,
+                "Exploring station"
+            );
+
             let departures = self
                 .provider
                 .get_departures(&state.station, min_departure)?;
+
+            debug!(
+                station = %state.station.as_str(),
+                departures = departures.len(),
+                "Got departures"
+            );
 
             // Explore each departure
             for service in departures {
@@ -290,6 +346,12 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                     None => continue,
                 };
 
+                trace!(
+                    service_id = %service.service_ref.darwin_id,
+                    terminus = %service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
+                    "Exploring service"
+                );
+
                 // Explore alighting at each subsequent stop
                 self.explore_service(
                     &state,
@@ -305,10 +367,25 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         }
 
         // Rank and filter results
+        debug!(
+            routes_explored,
+            journeys_found = journeys.len(),
+            "BFS complete"
+        );
         let journeys = remove_dominated(journeys);
         let journeys = deduplicate(journeys);
         let mut journeys = rank_journeys(journeys);
         journeys.truncate(self.config.max_results);
+
+        info!(
+            routes_explored,
+            journeys = journeys.len(),
+            "Search complete"
+        );
+
+        if journeys.is_empty() {
+            warn!("No routes found to destination");
+        }
 
         Ok(SearchResult {
             journeys,

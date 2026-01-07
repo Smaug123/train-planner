@@ -10,7 +10,9 @@ use crate::domain::{
     parse_time_sequence, parse_time_sequence_reverse,
 };
 
-use super::types::{CallingPoint, ServiceItemWithCallingPoints, StationBoardWithDetails};
+use super::types::{
+    CallingPoint, ServiceDetails, ServiceItemWithCallingPoints, StationBoardWithDetails,
+};
 
 /// Error during DTO to domain conversion.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -98,16 +100,21 @@ pub fn convert_service_item(
         .as_ref()
         .and_then(|c| AtocCode::parse(c).ok());
 
-    // Parse scheduled departure time at board station
-    let scheduled_departure = item
+    // Parse scheduled time at board station.
+    // Prefer std (departure) but fall back to sta (arrival) for arrivals boards
+    // or set-down-only services that have no departure.
+    let scheduled_time_str = item
         .std
         .as_ref()
-        .ok_or(ConversionError::MissingField("std (scheduled departure)"))?;
-    let scheduled_departure = RailTime::parse_hhmm(scheduled_departure, board_date)
-        .map_err(|_| ConversionError::InvalidTime(scheduled_departure.clone()))?;
+        .or(item.sta.as_ref())
+        .ok_or(ConversionError::MissingField("std or sta (scheduled time)"))?;
+    let scheduled_departure = RailTime::parse_hhmm(scheduled_time_str, board_date)
+        .map_err(|_| ConversionError::InvalidTime(scheduled_time_str.clone()))?;
 
-    // Parse expected departure (may be "On time", "Delayed", "Cancelled", or a time)
-    let expected_departure = parse_expected_time(item.etd.as_deref(), &scheduled_departure);
+    // Parse expected time (may be "On time", "Delayed", "Cancelled", or a time).
+    // Prefer etd (departure) but fall back to eta (arrival) for arrivals boards.
+    let expected_time_str = item.etd.as_deref().or(item.eta.as_deref());
+    let expected_departure = parse_expected_time(expected_time_str, &scheduled_departure);
 
     // Parse destination info
     let (destination, destination_crs) = parse_destination(item);
@@ -139,6 +146,198 @@ pub fn convert_service_item(
     };
 
     Ok(ConvertedService { candidate, service })
+}
+
+/// Convert a ServiceDetails response (from GetServiceDetails) to domain types.
+///
+/// This is used when we need full calling points for a service found on the arrivals
+/// board (which only has previous calling points). GetServiceDetails returns both
+/// previous and subsequent calling points.
+///
+/// # Arguments
+///
+/// * `details` - The ServiceDetails response from Darwin
+/// * `service_id` - The Darwin service ID (not included in ServiceDetails)
+/// * `board_crs` - The CRS of the station where we queried
+/// * `board_date` - The date for time parsing
+pub fn convert_service_details(
+    details: &ServiceDetails,
+    service_id: &str,
+    board_crs: &Crs,
+    board_date: NaiveDate,
+) -> Result<ConvertedService, ConversionError> {
+    let service_ref = ServiceRef::new(service_id.to_string(), *board_crs);
+
+    // Parse headcode from RSID if available
+    let headcode = details.rsid.as_ref().and_then(|rsid| {
+        if rsid.len() >= 6 {
+            Headcode::parse(&rsid[2..6])
+        } else {
+            None
+        }
+    });
+
+    // Parse operator code
+    let operator_code = details
+        .operator_code
+        .as_ref()
+        .and_then(|c| AtocCode::parse(c).ok());
+
+    // Parse scheduled time at board station (prefer departure, fall back to arrival)
+    let scheduled_time_str = details
+        .std
+        .as_ref()
+        .or(details.sta.as_ref())
+        .ok_or(ConversionError::MissingField("std or sta (scheduled time)"))?;
+    let scheduled_time = RailTime::parse_hhmm(scheduled_time_str, board_date)
+        .map_err(|_| ConversionError::InvalidTime(scheduled_time_str.clone()))?;
+
+    // Parse expected time (prefer departure, fall back to arrival)
+    let expected_time_str = details.etd.as_deref().or(details.eta.as_deref());
+    let expected_time = parse_expected_time(expected_time_str, &scheduled_time);
+
+    // Build calls list
+    let (calls, board_station_idx) = build_calls_from_details(details, board_crs, board_date)?;
+
+    // Extract destination from last subsequent calling point
+    let (destination, destination_crs) = extract_destination_from_calls(&calls);
+
+    let candidate = ServiceCandidate {
+        service_ref: service_ref.clone(),
+        headcode,
+        scheduled_departure: scheduled_time,
+        expected_departure: expected_time,
+        destination,
+        destination_crs,
+        operator: details.operator.clone().unwrap_or_default(),
+        operator_code,
+        platform: details.platform.clone(),
+        is_cancelled: details.is_cancelled.unwrap_or(false),
+    };
+
+    let service = Service {
+        service_ref,
+        headcode,
+        operator: details.operator.clone().unwrap_or_default(),
+        operator_code,
+        calls,
+        board_station_idx,
+    };
+
+    Ok(ConvertedService { candidate, service })
+}
+
+/// Build calls list from ServiceDetails.
+fn build_calls_from_details(
+    details: &ServiceDetails,
+    board_crs: &Crs,
+    board_date: NaiveDate,
+) -> Result<(Vec<Call>, CallIndex), ConversionError> {
+    let mut calls = Vec::new();
+
+    // 1. Parse previous calling points
+    let previous = details
+        .previous_calling_points
+        .as_ref()
+        .and_then(|arrays| arrays.first())
+        .map(|a| &a.calling_point[..])
+        .unwrap_or(&[]);
+
+    if !previous.is_empty() {
+        let reversed: Vec<&CallingPoint> = previous.iter().rev().collect();
+        let times: Vec<Option<&str>> = reversed.iter().map(|cp| cp.st.as_deref()).collect();
+        let parsed_times = parse_time_sequence_reverse(&times, board_date)
+            .map_err(|e| ConversionError::InvalidTime(e.to_string()))?;
+
+        let mut prev_calls: Vec<Call> = reversed
+            .iter()
+            .zip(parsed_times.iter())
+            .map(|(cp, time)| calling_point_to_call(cp, *time, false))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        prev_calls.reverse();
+        calls.extend(prev_calls);
+    }
+
+    // 2. Create board station call
+    let board_call = create_board_station_call_from_details(details, board_crs, board_date)?;
+    let board_station_idx = CallIndex(calls.len());
+    calls.push(board_call);
+
+    // 3. Parse subsequent calling points
+    let subsequent = details
+        .subsequent_calling_points
+        .as_ref()
+        .and_then(|arrays| arrays.first())
+        .map(|a| &a.calling_point[..])
+        .unwrap_or(&[]);
+
+    if !subsequent.is_empty() {
+        let anchor_time = details.std.as_deref().or(details.sta.as_deref());
+        let mut times: Vec<Option<&str>> = Vec::with_capacity(subsequent.len() + 1);
+        times.push(anchor_time);
+        times.extend(subsequent.iter().map(|cp| cp.st.as_deref()));
+
+        let parsed_times = parse_time_sequence(&times, board_date)
+            .map_err(|e| ConversionError::InvalidTime(e.to_string()))?;
+
+        let count = subsequent.len();
+        let sub_calls: Vec<Call> = subsequent
+            .iter()
+            .zip(parsed_times.iter().skip(1))
+            .enumerate()
+            .map(|(idx, (cp, time))| {
+                let is_final = idx == count - 1;
+                calling_point_to_call(cp, *time, is_final)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        calls.extend(sub_calls);
+    }
+
+    Ok((calls, board_station_idx))
+}
+
+/// Create the board station call from ServiceDetails.
+fn create_board_station_call_from_details(
+    details: &ServiceDetails,
+    board_crs: &Crs,
+    board_date: NaiveDate,
+) -> Result<Call, ConversionError> {
+    let mut call = Call::new(*board_crs, details.location_name.clone());
+
+    // Parse arrival time
+    if let Some(sta) = &details.sta
+        && let Ok(t) = RailTime::parse_hhmm(sta, board_date)
+    {
+        call.booked_arrival = Some(t);
+        if let Some(rt) = parse_expected_time(details.eta.as_deref(), &t) {
+            call.realtime_arrival = Some(rt);
+        }
+    }
+
+    // Parse departure time
+    if let Some(std) = &details.std
+        && let Ok(t) = RailTime::parse_hhmm(std, board_date)
+    {
+        call.booked_departure = Some(t);
+        if let Some(rt) = parse_expected_time(details.etd.as_deref(), &t) {
+            call.realtime_departure = Some(rt);
+        }
+    }
+
+    call.platform = details.platform.clone();
+    call.is_cancelled = details.is_cancelled.unwrap_or(false);
+
+    Ok(call)
+}
+
+/// Extract destination name and CRS from the last call in the calls list.
+fn extract_destination_from_calls(calls: &[Call]) -> (String, Option<Crs>) {
+    calls
+        .last()
+        .map(|c| (c.station_name.clone(), Some(c.station)))
+        .unwrap_or_else(|| ("Unknown".to_string(), None))
 }
 
 /// Parse an expected time field, which may be a time or a status string.
@@ -889,5 +1088,88 @@ mod fixed_behavior_tests {
             bristol_call.booked_departure.is_none(),
             "Final destination should NOT have booked_departure set"
         );
+    }
+
+    /// FIXED: Arrivals board services (with sta/eta but no std/etd) are now handled.
+    ///
+    /// Services on arrivals boards have arrival times, not departure times.
+    /// This occurs for set-down-only stops and terminus arrivals.
+    #[test]
+    fn arrivals_board_service_uses_sta_eta() {
+        use crate::darwin::types::ServiceLocation;
+
+        // Create a service as it would appear on an arrivals board
+        // (has sta/eta but no std/etd)
+        let item = ServiceItemWithCallingPoints {
+            service_id: "ARR123".to_string(),
+            rsid: Some("LE1P2300".to_string()),
+            sta: Some("09:15".to_string()), // Scheduled arrival
+            eta: Some("09:20".to_string()), // Expected arrival (delayed)
+            std: None,                      // No departure - arrivals board
+            etd: None,
+            platform: Some("3".to_string()),
+            operator: Some("Greater Anglia".to_string()),
+            operator_code: Some("LE".to_string()),
+            is_cancelled: Some(false),
+            service_type: None,
+            length: None,
+            origin: Some(vec![ServiceLocation {
+                location_name: "Norwich".to_string(),
+                crs: "NRW".to_string(),
+                via: None,
+                future_change_to: None,
+            }]),
+            destination: Some(vec![ServiceLocation {
+                location_name: "London Liverpool Street".to_string(),
+                crs: "LST".to_string(),
+                via: None,
+                future_change_to: None,
+            }]),
+            previous_calling_points: Some(vec![ArrayOfCallingPoints {
+                calling_point: vec![
+                    make_calling_point("Norwich", "NRW", "07:30"),
+                    make_calling_point("Ipswich", "IPS", "08:15"),
+                ],
+                service_type: None,
+                service_change_required: None,
+                assoc_is_cancelled: None,
+            }]),
+            subsequent_calling_points: Some(vec![ArrayOfCallingPoints {
+                calling_point: vec![make_calling_point(
+                    "London Liverpool Street",
+                    "LST",
+                    "09:30",
+                )],
+                service_type: None,
+                service_change_required: None,
+                assoc_is_cancelled: None,
+            }]),
+            cancel_reason: None,
+            delay_reason: None,
+        };
+
+        let board_crs = Crs::parse("SRA").unwrap();
+        let result = convert_service_item(&item, &board_crs, "Stratford", date());
+
+        assert!(
+            result.is_ok(),
+            "Arrivals board service should convert successfully"
+        );
+
+        let converted = result.unwrap();
+
+        // Candidate should use sta/eta since std/etd are absent
+        assert_eq!(converted.candidate.scheduled_departure.to_string(), "09:15");
+        assert_eq!(
+            converted.candidate.expected_departure.unwrap().to_string(),
+            "09:20"
+        );
+
+        // Service should have all calls: NRW, IPS, SRA (board), LST
+        assert_eq!(converted.service.calls.len(), 4);
+        assert_eq!(converted.service.calls[0].station.as_str(), "NRW");
+        assert_eq!(converted.service.calls[1].station.as_str(), "IPS");
+        assert_eq!(converted.service.calls[2].station.as_str(), "SRA");
+        assert_eq!(converted.service.calls[3].station.as_str(), "LST");
     }
 }

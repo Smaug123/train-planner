@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
 use train_server::cache::{CacheConfig, CachedDarwinClient};
 
 /// Read a secret from environment, preferring `{name}_FILE` over `{name}`.
@@ -30,6 +32,16 @@ const STATION_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[tokio::main]
 async fn main() {
+    // Set up tracing subscriber
+    // Use RUST_LOG env var to control verbosity, e.g.:
+    //   RUST_LOG=info                     - info level for everything
+    //   RUST_LOG=train_server::darwin=debug  - debug for Darwin client only
+    //   RUST_LOG=train_server::planner=trace - trace for planner
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(EnvFilter::from_default_env().add_directive("train_server=info".parse().unwrap()))
+        .init();
+
     // Check if we should use mock data
     let use_mock = std::env::var("USE_MOCK_DARWIN")
         .ok()
@@ -70,6 +82,12 @@ async fn main() {
                 "Note: DARWIN_ARRIVALS_API_KEY not set. Train identification at terminus stations won't work.\n\
                  Subscribe to the arrivals product on Rail Data Marketplace for this feature."
             );
+        }
+
+        // Check for optional capture directory (for debugging/testing)
+        if let Ok(capture_dir) = std::env::var("DARWIN_CAPTURE_DIR") {
+            println!("Darwin capture enabled: {}", capture_dir);
+            darwin_config = darwin_config.with_capture_dir(&capture_dir);
         }
 
         let client = DarwinClient::new(darwin_config).expect("Failed to create Darwin client");
