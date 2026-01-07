@@ -3,11 +3,13 @@
 //! Provides async methods for querying the Darwin Live Departure Boards API.
 //! Handles authentication, rate limiting, and conversion to domain types.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::NaiveDate;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::Semaphore;
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::domain::Crs;
 
@@ -39,6 +41,8 @@ pub struct DarwinConfig {
     pub max_concurrent: usize,
     /// Request timeout in seconds
     pub timeout_secs: u64,
+    /// Directory for capturing API responses (None = no capture)
+    pub capture_dir: Option<PathBuf>,
 }
 
 impl DarwinConfig {
@@ -50,6 +54,7 @@ impl DarwinConfig {
             departures_url: DEFAULT_DEPARTURES_URL.to_string(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             timeout_secs: 30,
+            capture_dir: None,
         }
     }
 
@@ -78,6 +83,13 @@ impl DarwinConfig {
         self.timeout_secs = secs;
         self
     }
+
+    /// Set capture directory for saving API responses.
+    /// When set, all successful API responses will be saved as JSON files.
+    pub fn with_capture_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.capture_dir = Some(dir.into());
+        self
+    }
 }
 
 /// Darwin LDB API client.
@@ -90,6 +102,7 @@ pub struct DarwinClient {
     departures_url: String,
     arrivals_api_key: Option<String>,
     semaphore: Arc<Semaphore>,
+    capture_dir: Option<PathBuf>,
 }
 
 impl DarwinClient {
@@ -110,12 +123,38 @@ impl DarwinClient {
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()?;
 
+        // Create capture directory if specified
+        if let Some(ref dir) = config.capture_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                warn!("Failed to create capture directory {:?}: {}", dir, e);
+            } else {
+                info!("Darwin capture enabled: {:?}", dir);
+            }
+        }
+
         Ok(Self {
             http,
             departures_url: config.departures_url,
             arrivals_api_key: config.arrivals_api_key,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
+            capture_dir: config.capture_dir,
         })
+    }
+
+    /// Capture a response to disk if capture is enabled.
+    fn capture_response(&self, board_type: &str, crs: &str, body: &str) {
+        if let Some(ref dir) = self.capture_dir {
+            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f");
+            let filename = format!("{}_{}_{}.json", board_type, crs, timestamp);
+            let path = dir.join(&filename);
+
+            match std::fs::write(&path, body) {
+                Ok(()) => info!(path = %path.display(), "Captured Darwin response"),
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "Failed to capture Darwin response")
+                }
+            }
+        }
     }
 
     /// Get departure board with details for a station.
@@ -131,6 +170,7 @@ impl DarwinClient {
     /// * `time_offset` - Minutes offset from now (-120 to 120)
     /// * `time_window` - Minutes window for results (0 to 120)
     /// * `board_date` - Date to use for parsing times
+    #[instrument(skip(self), fields(crs = %crs.as_str()))]
     pub async fn get_departures_with_details(
         &self,
         crs: &Crs,
@@ -139,6 +179,8 @@ impl DarwinClient {
         time_window: u16,
         board_date: NaiveDate,
     ) -> Result<Vec<ConvertedService>, DarwinError> {
+        debug!(num_rows, time_offset, time_window, %board_date, "Fetching departures");
+
         let _permit = self
             .semaphore
             .acquire()
@@ -153,6 +195,8 @@ impl DarwinClient {
             self.departures_url,
             crs.as_str()
         );
+
+        trace!(%url, "Sending Darwin request");
 
         let response = self
             .http
@@ -166,18 +210,21 @@ impl DarwinClient {
             .await?;
 
         let status = response.status();
+        debug!(%status, "Darwin response received");
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            warn!("Darwin API unauthorized");
             return Err(DarwinError::Unauthorized);
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("Darwin API rate limited");
             return Err(DarwinError::RateLimited);
         }
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            eprintln!("[Darwin] {status} from {url}");
+            warn!(%status, %url, "Darwin API error");
             return Err(DarwinError::ApiError {
                 status: status.as_u16(),
                 message: body,
@@ -186,16 +233,33 @@ impl DarwinClient {
 
         let body = response.text().await?;
 
+        // Capture response if enabled
+        self.capture_response("departures", crs.as_str(), &body);
+
         let board: StationBoardWithDetails =
             serde_json::from_str(&body).map_err(|e| DarwinError::Json {
                 message: e.to_string(),
                 body: Some(body.chars().take(500).collect()),
             })?;
 
-        convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
-            message: e.to_string(),
-            body: None,
-        })
+        let services =
+            convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
+                message: e.to_string(),
+                body: None,
+            })?;
+
+        debug!(service_count = services.len(), "Departures parsed");
+        for svc in &services {
+            trace!(
+                service_id = %svc.service.service_ref.darwin_id,
+                operator = %svc.service.operator,
+                terminus = %svc.service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
+                calls = svc.service.calls.len(),
+                "Service"
+            );
+        }
+
+        Ok(services)
     }
 
     /// Get departure board with details, filtered to services calling at a destination.
@@ -208,6 +272,7 @@ impl DarwinClient {
     /// * `time_offset` - Minutes offset from now
     /// * `time_window` - Minutes window for results
     /// * `board_date` - Date to use for parsing times
+    #[instrument(skip(self), fields(crs = %crs.as_str(), filter = %filter_crs.as_str()))]
     pub async fn get_departures_to(
         &self,
         crs: &Crs,
@@ -217,6 +282,8 @@ impl DarwinClient {
         time_window: u16,
         board_date: NaiveDate,
     ) -> Result<Vec<ConvertedService>, DarwinError> {
+        debug!(num_rows, time_offset, time_window, %board_date, "Fetching filtered departures");
+
         let _permit = self
             .semaphore
             .acquire()
@@ -231,6 +298,8 @@ impl DarwinClient {
             self.departures_url,
             crs.as_str()
         );
+
+        trace!(%url, "Sending Darwin request");
 
         let response = self
             .http
@@ -246,17 +315,21 @@ impl DarwinClient {
             .await?;
 
         let status = response.status();
+        debug!(%status, "Darwin response received");
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            warn!("Darwin API unauthorized");
             return Err(DarwinError::Unauthorized);
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("Darwin API rate limited");
             return Err(DarwinError::RateLimited);
         }
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            warn!(%status, %url, "Darwin API error");
             return Err(DarwinError::ApiError {
                 status: status.as_u16(),
                 message: body,
@@ -265,16 +338,25 @@ impl DarwinClient {
 
         let body = response.text().await?;
 
+        // Capture response if enabled
+        let capture_name = format!("departures_{}_to_{}", crs.as_str(), filter_crs.as_str());
+        self.capture_response(&capture_name, "", &body);
+
         let board: StationBoardWithDetails =
             serde_json::from_str(&body).map_err(|e| DarwinError::Json {
                 message: e.to_string(),
                 body: Some(body.chars().take(500).collect()),
             })?;
 
-        convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
-            message: e.to_string(),
-            body: None,
-        })
+        let services =
+            convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
+                message: e.to_string(),
+                body: None,
+            })?;
+
+        debug!(service_count = services.len(), "Filtered departures parsed");
+
+        Ok(services)
     }
 
     /// Get service details by ID.
@@ -286,10 +368,13 @@ impl DarwinClient {
     ///
     /// For most use cases, prefer `get_departures_with_details` which includes
     /// calling points inline, avoiding the need for separate detail requests.
+    #[instrument(skip(self))]
     pub async fn get_service_details(
         &self,
         service_id: &str,
     ) -> Result<ServiceDetails, DarwinError> {
+        debug!("Fetching service details");
+
         let _permit = self
             .semaphore
             .acquire()
@@ -304,24 +389,31 @@ impl DarwinClient {
             self.departures_url, service_id
         );
 
+        trace!(%url, "Sending Darwin request");
+
         let response = self.http.get(&url).send().await?;
 
         let status = response.status();
+        debug!(%status, "Darwin response received");
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            warn!("Darwin API unauthorized");
             return Err(DarwinError::Unauthorized);
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("Darwin API rate limited");
             return Err(DarwinError::RateLimited);
         }
 
         if status == reqwest::StatusCode::NOT_FOUND {
+            debug!("Service not found");
             return Err(DarwinError::ServiceNotFound);
         }
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            warn!(%status, %url, "Darwin API error");
             return Err(DarwinError::ApiError {
                 status: status.as_u16(),
                 message: body,
@@ -330,8 +422,12 @@ impl DarwinClient {
 
         let body = response.text().await?;
 
+        // Capture response if enabled
+        self.capture_response("service", service_id, &body);
+
         // Darwin returns null/empty for expired service IDs
         if body.is_empty() || body == "null" {
+            debug!("Service expired (null response)");
             return Err(DarwinError::ServiceNotFound);
         }
 
@@ -357,6 +453,7 @@ impl DarwinClient {
     /// * `time_offset` - Minutes offset from now (-120 to 120)
     /// * `time_window` - Minutes window for results (0 to 120)
     /// * `board_date` - Date to use for parsing times
+    #[instrument(skip(self), fields(crs = %crs.as_str()))]
     pub async fn get_arrivals_with_details(
         &self,
         crs: &Crs,
@@ -365,6 +462,8 @@ impl DarwinClient {
         time_window: u16,
         board_date: NaiveDate,
     ) -> Result<Vec<ConvertedService>, DarwinError> {
+        debug!(num_rows, time_offset, time_window, %board_date, "Fetching arrivals");
+
         let arrivals_api_key = self.arrivals_api_key.as_ref().ok_or_else(|| DarwinError::ApiError {
             status: 0,
             message: "Arrivals API not configured. Set DARWIN_ARRIVALS_API_KEY and subscribe to the arrivals product on Rail Data Marketplace.".to_string(),
@@ -385,6 +484,8 @@ impl DarwinClient {
             crs.as_str()
         );
 
+        trace!(%url, "Sending Darwin request");
+
         // Use arrivals API key (different product, different key)
         let response = self
             .http
@@ -399,18 +500,21 @@ impl DarwinClient {
             .await?;
 
         let status = response.status();
+        debug!(%status, "Darwin response received");
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            warn!("Darwin API unauthorized");
             return Err(DarwinError::Unauthorized);
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("Darwin API rate limited");
             return Err(DarwinError::RateLimited);
         }
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            eprintln!("[Darwin] {status} from {url}");
+            warn!(%status, %url, "Darwin API error");
             return Err(DarwinError::ApiError {
                 status: status.as_u16(),
                 message: body,
@@ -419,24 +523,35 @@ impl DarwinClient {
 
         let body = response.text().await?;
 
+        // Capture response if enabled
+        self.capture_response("arrivals", crs.as_str(), &body);
+
         let board: StationBoardWithDetails =
             serde_json::from_str(&body).map_err(|e| DarwinError::Json {
                 message: e.to_string(),
                 body: Some(body.chars().take(500).collect()),
             })?;
 
-        convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
-            message: e.to_string(),
-            body: None,
-        })
+        let services =
+            convert_station_board(&board, board_date).map_err(|e| DarwinError::Json {
+                message: e.to_string(),
+                body: None,
+            })?;
+
+        debug!(service_count = services.len(), "Arrivals parsed");
+
+        Ok(services)
     }
 
     /// Get the raw departure board response (for debugging/testing).
+    #[instrument(skip(self), fields(crs = %crs.as_str()))]
     pub async fn get_departures_raw(
         &self,
         crs: &Crs,
         num_rows: u8,
     ) -> Result<StationBoardWithDetails, DarwinError> {
+        debug!(num_rows, "Fetching raw departures");
+
         let _permit = self
             .semaphore
             .acquire()
@@ -452,6 +567,8 @@ impl DarwinClient {
             crs.as_str()
         );
 
+        trace!(%url, "Sending Darwin request");
+
         let response = self
             .http
             .get(&url)
@@ -460,9 +577,11 @@ impl DarwinClient {
             .await?;
 
         let status = response.status();
+        debug!(%status, "Darwin response received");
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            warn!(%status, %url, "Darwin API error");
             return Err(DarwinError::ApiError {
                 status: status.as_u16(),
                 message: body,
@@ -470,6 +589,9 @@ impl DarwinClient {
         }
 
         let body = response.text().await?;
+
+        // Capture response if enabled
+        self.capture_response("raw_departures", crs.as_str(), &body);
 
         serde_json::from_str(&body).map_err(|e| DarwinError::Json {
             message: e.to_string(),
@@ -506,6 +628,14 @@ mod tests {
         assert_eq!(config.arrivals_api_key, None);
         assert_eq!(config.max_concurrent, DEFAULT_MAX_CONCURRENT);
         assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.capture_dir, None);
+    }
+
+    #[test]
+    fn config_with_capture() {
+        let config = DarwinConfig::new("test-api-key").with_capture_dir("/tmp/captures");
+
+        assert_eq!(config.capture_dir, Some(PathBuf::from("/tmp/captures")));
     }
 
     #[test]
