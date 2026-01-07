@@ -426,4 +426,57 @@ mod tests {
         let subseq = details.subsequent_calling_points.as_ref().unwrap();
         assert_eq!(subseq[0].calling_point.len(), 2);
     }
+
+    /// Golden test: parse real Darwin response from Elizabeth Line at Whitechapel.
+    /// This captures the case where intermediate calling points only have departure times.
+    #[test]
+    fn golden_elizabeth_line_whitechapel_departures() {
+        let json = include_str!("../../tests/fixtures/elizabeth_line_zlw_departures.json");
+        let board: StationBoardWithDetails =
+            serde_json::from_str(json).expect("Failed to parse Elizabeth Line golden test fixture");
+
+        assert_eq!(board.crs, "ZLW");
+        assert_eq!(board.location_name, "Whitechapel");
+
+        let services = board.train_services.expect("Should have train services");
+        assert!(!services.is_empty(), "Should have at least one service");
+
+        // Find the Elizabeth Line service to Paddington (the one we used for debugging)
+        let elizabeth_to_pad = services.iter().find(|s| {
+            s.operator_code.as_deref() == Some("XR")
+                && s.destination
+                    .as_ref()
+                    .is_some_and(|d| d.iter().any(|loc| loc.crs == "PAD"))
+        });
+
+        let service = elizabeth_to_pad.expect("Should have Elizabeth Line service to Paddington");
+
+        // Verify subsequent calling points exist and have expected structure
+        let subsequent = service
+            .subsequent_calling_points
+            .as_ref()
+            .expect("Service should have subsequent calling points");
+        let calls = &subsequent[0].calling_point;
+
+        // Should have multiple intermediate stops (LST, ZFD, TCR, BDS, PAD)
+        assert!(
+            calls.len() >= 4,
+            "Should have at least 4 calling points, got {}",
+            calls.len()
+        );
+
+        // Find Farringdon (ZFD) - this is an intermediate stop
+        let farringdon = calls.iter().find(|c| c.crs == "ZFD");
+        let farringdon = farringdon.expect("Should have Farringdon calling point");
+
+        // Intermediate stops have st (scheduled time) but this is departure, not arrival
+        assert!(
+            farringdon.st.is_some(),
+            "Farringdon should have scheduled time"
+        );
+
+        // Verify Paddington is the last stop (terminus)
+        let last_call = calls.last().expect("Should have calls");
+        assert_eq!(last_call.crs, "PAD", "Last stop should be Paddington");
+    }
 }

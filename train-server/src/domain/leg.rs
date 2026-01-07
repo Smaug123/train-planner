@@ -93,9 +93,12 @@ impl Leg {
         let departure = board_call
             .expected_departure()
             .ok_or_else(|| DomainError::MissingTime("boarding departure".into()))?;
+        // Darwin only provides departure times for intermediate calling points.
+        // Fall back to departure time if arrival isn't available (conservative estimate).
         let arrival = alight_call
             .expected_arrival()
-            .ok_or_else(|| DomainError::MissingTime("alighting arrival".into()))?;
+            .or_else(|| alight_call.expected_departure())
+            .ok_or_else(|| DomainError::MissingTime("alighting arrival/departure".into()))?;
 
         Ok(Leg {
             service,
