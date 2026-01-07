@@ -39,10 +39,13 @@ pub fn filter_and_rank_matches(
     let mut matches: Vec<TrainMatch> = services
         .iter()
         .filter_map(|svc| {
-            // If terminus specified, check it matches final calling point
+            // If terminus specified, check it matches the service's destination.
+            // Use candidate.destination_crs (from Darwin's destination field) rather than
+            // the last call, because arrivals boards don't include subsequent calling points
+            // so the calls array ends at the board station, not the actual terminus.
             if let Some(term) = terminus {
-                let dest = svc.service.destination_call()?;
-                if &dest.1.station != term {
+                let dest_crs = svc.candidate.destination_crs.as_ref()?;
+                if dest_crs != term {
                     return None;
                 }
             }
@@ -229,7 +232,7 @@ mod tests {
         assert!(
             matches
                 .iter()
-                .all(|m| { m.service.service.destination_call().unwrap().1.station == crs("IPS") })
+                .all(|m| { m.service.candidate.destination_crs == Some(crs("IPS")) })
         );
         assert!(
             matches
@@ -563,9 +566,9 @@ mod property_tests {
             let matches = filter_and_rank_matches(&services, Some(&terminus));
 
             for m in &matches {
-                let dest = m.service.service.destination_call()
-                    .expect("service should have destination");
-                prop_assert_eq!(&dest.1.station, &terminus);
+                let dest_crs = m.service.candidate.destination_crs
+                    .expect("service should have destination_crs");
+                prop_assert_eq!(&dest_crs, &terminus);
             }
         }
 

@@ -25,6 +25,9 @@ pub enum DarwinError {
 
     /// Invalid API key or unauthorized
     Unauthorized,
+
+    /// Feature not configured or not available
+    NotConfigured(String),
 }
 
 impl fmt::Display for DarwinError {
@@ -46,6 +49,7 @@ impl fmt::Display for DarwinError {
             }
             DarwinError::RateLimited => write!(f, "rate limited by Darwin API"),
             DarwinError::Unauthorized => write!(f, "unauthorized (invalid API key)"),
+            DarwinError::NotConfigured(msg) => write!(f, "not configured: {msg}"),
         }
     }
 }

@@ -210,22 +210,75 @@ async fn identify_train(
     let date = now.date_naive();
     let current_mins = (now.time().hour() * 60 + now.time().minute()) as u16;
 
-    // Query the appropriate board based on whether the train is arriving at terminus
-    let services = if terminus.as_ref() == Some(&next_station) {
-        // Train is arriving at terminus - use arrivals board
+    // Query both boards and merge results.
+    // - Departures board has subsequent calling points (where train is going)
+    // - Arrivals board finds set-down-only trains that don't appear on departures
+    // For services appearing on both, prefer departures data (has future stops).
+    let (departures, arrivals) = tokio::join!(
+        state
+            .darwin
+            .get_departures_with_details(&next_station, date, current_mins, 0, 30),
         state
             .darwin
             .get_arrivals_with_details(&next_station, date, current_mins, 0, 30)
-            .await
-            .map_err(AppError::from)?
-    } else {
-        // Normal case - use departures board
-        state
-            .darwin
-            .get_departures_with_details(&next_station, date, current_mins, 0, 30)
-            .await
-            .map_err(AppError::from)?
-    };
+    );
+
+    let departures = departures.unwrap_or_default();
+    let arrivals = arrivals.unwrap_or_default();
+
+    // Merge: use departures as base, add arrivals-only services.
+    // Departures have subsequent calling points; arrivals catch set-down-only trains.
+    let departure_ids: std::collections::HashSet<_> = departures
+        .iter()
+        .map(|s| s.service.service_ref.darwin_id.as_str())
+        .collect();
+
+    // Identify arrivals-only services (set-down-only trains not on departures board)
+    let arrivals_only: Vec<_> = arrivals
+        .iter()
+        .filter(|s| !departure_ids.contains(s.service.service_ref.darwin_id.as_str()))
+        .collect();
+
+    // For arrivals-only services, fetch full service details to get subsequent calling points.
+    // This is an extra API call per service, but these are rare (set-down-only trains).
+    let mut enhanced_arrivals = Vec::new();
+    for svc in arrivals_only {
+        let service_id = &svc.service.service_ref.darwin_id;
+        match state.darwin.get_service_details(service_id).await {
+            Ok(details) => {
+                match crate::darwin::convert_service_details(
+                    &details,
+                    service_id,
+                    &next_station,
+                    date,
+                ) {
+                    Ok(converted) => enhanced_arrivals.push(std::sync::Arc::new(converted)),
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: failed to convert service details for {}: {}",
+                            service_id, e
+                        );
+                        // Fall back to the original arrivals data
+                        enhanced_arrivals.push(svc.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to fetch service details for {}: {}",
+                    service_id, e
+                );
+                // Fall back to the original arrivals data
+                enhanced_arrivals.push(svc.clone());
+            }
+        }
+    }
+
+    let services: Vec<_> = departures
+        .iter()
+        .cloned()
+        .chain(enhanced_arrivals)
+        .collect();
 
     // Filter and rank matches using the extracted logic
     let matches = filter_and_rank_matches(&services, terminus.as_ref());

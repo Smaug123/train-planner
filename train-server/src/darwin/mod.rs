@@ -21,7 +21,7 @@ mod mock;
 mod types;
 
 pub use client::{DarwinClient, DarwinConfig};
-pub use convert::{ConversionError, ConvertedService};
+pub use convert::{ConversionError, ConvertedService, convert_service_details};
 pub use error::DarwinError;
 pub use mock::MockDarwinClient;
 pub use types::{
@@ -95,6 +95,23 @@ impl DarwinClientImpl {
                     .get_arrivals_with_details(crs, num_rows, time_offset, time_window, board_date)
                     .await
             }
+        }
+    }
+
+    /// Get full service details by service ID.
+    ///
+    /// Returns the complete calling points for a service, including both
+    /// previous and subsequent stops. Useful for enriching arrivals-only
+    /// services with their future calling points.
+    pub async fn get_service_details(
+        &self,
+        service_id: &str,
+    ) -> Result<ServiceDetails, DarwinError> {
+        match self {
+            Self::Real(client) => client.get_service_details(service_id).await,
+            Self::Mock(_) => Err(DarwinError::NotConfigured(
+                "get_service_details not implemented for mock".to_string(),
+            )),
         }
     }
 }
