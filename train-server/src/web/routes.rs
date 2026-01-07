@@ -432,7 +432,10 @@ async fn plan_journey(
 
     // Run the planner
     let planner = Planner::new(&provider, &state.walkable, &state.config);
-    let result = planner.search(&search_request).map_err(AppError::from)?;
+    let result = planner
+        .search(&search_request)
+        .await
+        .map_err(AppError::from)?;
 
     // Return HTML or JSON based on Accept header
     if accepts_html(&headers) {
@@ -525,41 +528,33 @@ struct CachedServiceProvider {
 }
 
 impl crate::planner::ServiceProvider for CachedServiceProvider {
-    fn get_departures(
+    async fn get_departures(
         &self,
         station: &Crs,
         after: crate::domain::RailTime,
     ) -> Result<Vec<Arc<Service>>, SearchError> {
-        // This is a synchronous trait but we have async operations
-        // We use block_in_place to run the async code synchronously
-        // This is not ideal but works for the MVP
-        tokio::task::block_in_place(|| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let services = self
-                    .darwin
-                    .get_departures_with_details(station, self.date, self.current_mins, 0, 120)
-                    .await
-                    .map_err(|e| SearchError::FetchError {
-                        station: *station,
-                        message: e.to_string(),
-                    })?;
+        let services = self
+            .darwin
+            .get_departures_with_details(station, self.date, self.current_mins, 0, 120)
+            .await
+            .map_err(|e| SearchError::FetchError {
+                station: *station,
+                message: e.to_string(),
+            })?;
 
-                // Filter to departures after the specified time
-                let filtered: Vec<Arc<Service>> = services
-                    .iter()
-                    .filter(|s| {
-                        s.candidate
-                            .expected_departure
-                            .or(Some(s.candidate.scheduled_departure))
-                            .is_some_and(|t| t >= after)
-                    })
-                    .map(|s| Arc::new(s.service.clone()))
-                    .collect();
-
-                Ok(filtered)
+        // Filter to departures after the specified time
+        let filtered: Vec<Arc<Service>> = services
+            .iter()
+            .filter(|s| {
+                s.candidate
+                    .expected_departure
+                    .or(Some(s.candidate.scheduled_departure))
+                    .is_some_and(|t| t >= after)
             })
-        })
+            .map(|s| Arc::new(s.service.clone()))
+            .collect();
+
+        Ok(filtered)
     }
 }
 

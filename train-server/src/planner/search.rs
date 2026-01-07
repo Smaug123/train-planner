@@ -100,7 +100,7 @@ impl SearchResult {
 /// Trait for providing departure services.
 ///
 /// This abstraction allows the planner to be tested with mock data.
-pub trait ServiceProvider {
+pub trait ServiceProvider: Send + Sync {
     /// Get departures from a station after a given time.
     ///
     /// Returns services that depart from `station` after `after` within
@@ -109,7 +109,7 @@ pub trait ServiceProvider {
         &self,
         station: &Crs,
         after: RailTime,
-    ) -> Result<Vec<Arc<Service>>, SearchError>;
+    ) -> impl std::future::Future<Output = Result<Vec<Arc<Service>>, SearchError>> + Send;
 }
 
 /// BFS state during search.
@@ -211,7 +211,7 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         current_position = request.current_position.0,
         service_id = %request.current_service.service_ref.darwin_id
     ))]
-    pub fn search(&self, request: &SearchRequest) -> Result<SearchResult, SearchError> {
+    pub async fn search(&self, request: &SearchRequest) -> Result<SearchResult, SearchError> {
         info!(
             terminus = %request.current_service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
             "Starting journey search"
@@ -319,7 +319,8 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
 
             let departures = self
                 .provider
-                .get_departures(&state.station, min_departure)?;
+                .get_departures(&state.station, min_departure)
+                .await?;
 
             debug!(
                 station = %state.station.as_str(),
@@ -596,7 +597,7 @@ mod tests {
     }
 
     impl ServiceProvider for MockProvider {
-        fn get_departures(
+        async fn get_departures(
             &self,
             station: &Crs,
             after: RailTime,
@@ -614,8 +615,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn direct_journey() {
+    #[tokio::test]
+    async fn direct_journey() {
         // User is on PAD->RDG->SWI->BRI train, wants to go to BRI
         let current = make_service(
             "S1",
@@ -635,15 +636,15 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("BRI"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         assert_eq!(result.journeys.len(), 1);
         assert_eq!(result.journeys[0].change_count(), 0);
         assert_eq!(result.journeys[0].arrival_time(), time("11:30"));
     }
 
-    #[test]
-    fn direct_journey_from_middle() {
+    #[tokio::test]
+    async fn direct_journey_from_middle() {
         // User is at RDG (position 1), wants to go to BRI
         let current = make_service(
             "S1",
@@ -663,15 +664,15 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(1), crs("BRI"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         assert_eq!(result.journeys.len(), 1);
         assert_eq!(result.journeys[0].departure_time(), time("10:27"));
         assert_eq!(result.journeys[0].arrival_time(), time("11:30"));
     }
 
-    #[test]
-    fn one_change_journey() {
+    #[tokio::test]
+    async fn one_change_journey() {
         // User is on PAD->RDG train, wants to go to OXF
         // Connection at RDG to RDG->OXF train
         let current = make_service(
@@ -699,7 +700,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("OXF"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         assert!(!result.journeys.is_empty());
         let journey = &result.journeys[0];
@@ -707,8 +708,8 @@ mod tests {
         assert_eq!(journey.arrival_time(), time("11:00"));
     }
 
-    #[test]
-    fn journey_with_walk() {
+    #[tokio::test]
+    async fn journey_with_walk() {
         // User is on train to EUS, wants to go to station served from KGX
         // Walk EUS -> KGX, then train KGX -> destination
         let current = make_service(
@@ -739,7 +740,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("YRK"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         assert!(!result.journeys.is_empty());
         let journey = &result.journeys[0];
@@ -747,8 +748,8 @@ mod tests {
         assert!(journey.segments().len() >= 2);
     }
 
-    #[test]
-    fn invalid_request_position_out_of_bounds() {
+    #[tokio::test]
+    async fn invalid_request_position_out_of_bounds() {
         let current = make_service(
             "S1",
             "PAD",
@@ -765,13 +766,13 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(10), crs("BRI"));
-        let result = planner.search(&request);
+        let result = planner.search(&request).await;
 
         assert!(matches!(result, Err(SearchError::InvalidRequest(_))));
     }
 
-    #[test]
-    fn invalid_request_no_subsequent_stops() {
+    #[tokio::test]
+    async fn invalid_request_no_subsequent_stops() {
         let current = make_service(
             "S1",
             "PAD",
@@ -789,13 +790,13 @@ mod tests {
 
         // Position at last stop - no subsequent stops
         let request = SearchRequest::new(current, CallIndex(1), crs("BRI"));
-        let result = planner.search(&request);
+        let result = planner.search(&request).await;
 
         assert!(matches!(result, Err(SearchError::InvalidRequest(_))));
     }
 
-    #[test]
-    fn respects_max_changes() {
+    #[tokio::test]
+    async fn respects_max_changes() {
         // Setup where destination requires 4 changes but max is 3
         let current = make_service(
             "S1",
@@ -850,7 +851,7 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
 
         let request = SearchRequest::new(current, CallIndex(0), crs("FFF"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         // Should not find route to FFF (would need 4 changes)
         // But might find routes to intermediate stations
@@ -859,8 +860,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_result_when_no_route() {
+    #[tokio::test]
+    async fn empty_result_when_no_route() {
         let current = make_service(
             "S1",
             "PAD",
@@ -878,13 +879,13 @@ mod tests {
 
         // Destination not on current train and no connections
         let request = SearchRequest::new(current, CallIndex(0), crs("XXX"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         assert!(result.journeys.is_empty());
     }
 
-    #[test]
-    fn intermediate_stops_with_only_departure_times() {
+    #[tokio::test]
+    async fn intermediate_stops_with_only_departure_times() {
         // Simulates Elizabeth Line / Darwin behavior where intermediate calling points
         // only have departure times (no arrival times). The search should still generate
         // initial states for these stops by falling back to departure time.
@@ -930,7 +931,7 @@ mod tests {
 
         // User at ZLW (position 0), wants CTK
         let request = SearchRequest::new(current, CallIndex(0), crs("CTK"));
-        let result = planner.search(&request).unwrap();
+        let result = planner.search(&request).await.unwrap();
 
         // Should find the journey: ZLW->ZFD (Elizabeth Line) + ZFD->CTK (Thameslink)
         assert!(
@@ -959,7 +960,7 @@ mod proptests {
     }
 
     impl ServiceProvider for MockProvider {
-        fn get_departures(
+        async fn get_departures(
             &self,
             station: &Crs,
             after: RailTime,
@@ -975,6 +976,18 @@ mod proptests {
                 .cloned()
                 .collect())
         }
+    }
+
+    /// Helper to run async search in a blocking context for proptest
+    fn block_on_search<P: ServiceProvider>(
+        planner: &Planner<'_, P>,
+        request: &SearchRequest,
+    ) -> Result<SearchResult, SearchError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(planner.search(request))
     }
 
     fn date() -> NaiveDate {
@@ -1284,7 +1297,7 @@ mod proptests {
                 return Ok(());
             }
 
-            let bfs_result = planner.search(&request)?;
+            let bfs_result = block_on_search(&planner, &request)?;
 
             // Run reference
             let ref_journeys = reference_search(
@@ -1343,7 +1356,7 @@ mod proptests {
                 return Ok(());
             }
 
-            let result = planner.search(&request)?;
+            let result = block_on_search(&planner, &request)?;
 
             for journey in &result.journeys {
                 prop_assert!(
@@ -1384,7 +1397,7 @@ mod proptests {
             if request.validate().is_ok() {
                 tests_with_valid_request.set(tests_with_valid_request.get() + 1);
 
-                if let Ok(result) = planner.search(&request)
+                if let Ok(result) = block_on_search(&planner, &request)
                     && !result.journeys.is_empty()
                 {
                     journeys_found.set(journeys_found.get() + 1);
