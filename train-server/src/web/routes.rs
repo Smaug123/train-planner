@@ -94,7 +94,7 @@ async fn search_service(
     Query(req): Query<SearchServiceRequest>,
 ) -> Result<Response, AppError> {
     // Parse origin CRS
-    let origin_crs = Crs::parse(&req.origin).map_err(|_| AppError::BadRequest {
+    let origin_crs = Crs::parse_normalized(&req.origin).map_err(|_| AppError::BadRequest {
         message: format!("Invalid origin CRS: {}", req.origin),
     })?;
 
@@ -102,7 +102,7 @@ async fn search_service(
     let dest_crs = req
         .destination
         .as_ref()
-        .map(|d| Crs::parse(d))
+        .map(|d| Crs::parse_normalized(d))
         .transpose()
         .map_err(|_| AppError::BadRequest {
             message: format!(
@@ -186,16 +186,17 @@ async fn identify_train(
     use crate::identify::filter_and_rank_matches;
 
     // Parse next station CRS
-    let next_station = Crs::parse(&req.next_station).map_err(|_| AppError::BadRequest {
-        message: format!("Invalid next station CRS: {}", req.next_station),
-    })?;
+    let next_station =
+        Crs::parse_normalized(&req.next_station).map_err(|_| AppError::BadRequest {
+            message: format!("Invalid next station CRS: {}", req.next_station),
+        })?;
 
     // Parse optional terminus CRS
     let terminus = req
         .terminus
         .as_ref()
         .filter(|t| !t.is_empty())
-        .map(|t| Crs::parse(t))
+        .map(|t| Crs::parse_normalized(t))
         .transpose()
         .map_err(|_| AppError::BadRequest {
             message: format!(
@@ -344,14 +345,15 @@ async fn plan_journey(
         }
     })?;
     // Parse destination CRS
-    let dest_crs = Crs::parse(&req.destination).map_err(|_| AppError::BadRequest {
+    let dest_crs = Crs::parse_normalized(&req.destination).map_err(|_| AppError::BadRequest {
         message: format!("Invalid destination CRS: {}", req.destination),
     })?;
 
     // Parse board station CRS
-    let board_station = Crs::parse(&req.board_station).map_err(|_| AppError::BadRequest {
-        message: format!("Invalid board station CRS: {}", req.board_station),
-    })?;
+    let board_station =
+        Crs::parse_normalized(&req.board_station).map_err(|_| AppError::BadRequest {
+            message: format!("Invalid board station CRS: {}", req.board_station),
+        })?;
 
     // Get current time info
     let now = Local::now();
