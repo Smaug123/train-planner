@@ -222,9 +222,13 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         let mut journeys = Vec::new();
         let mut routes_explored = 0;
 
+        // Track best arrival time for pruning: skip states that can't beat our best
+        let mut best_arrival: Option<RailTime> = None;
+
         // Check direct service to destination
         if let Some(journey) = self.check_direct(request) {
             debug!("Direct route found on current train");
+            best_arrival = Some(journey.arrival_time());
             journeys.push(journey);
         } else {
             debug!("No direct route on current train");
@@ -248,14 +252,30 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         while let Some(state) = queue.pop_front() {
             routes_explored += 1;
 
+            // Pruning: skip if we can't possibly beat the best arrival time
+            // (we're already at or past the best known arrival)
+            if best_arrival.is_some_and(|best| state.time >= best) {
+                trace!(
+                    station = %state.station.as_str(),
+                    time = %state.time,
+                    "Pruned: can't beat best arrival time"
+                );
+                continue;
+            }
+
             // Check if at destination
             if state.at_destination(&request.destination) {
                 if let Some(journey) = state.to_journey() {
+                    let arrival = journey.arrival_time();
                     debug!(
                         changes = journey.change_count(),
-                        arrival = %journey.arrival_time(),
+                        arrival = %arrival,
                         "Found journey to destination"
                     );
+                    // Update best arrival if this is better
+                    if best_arrival.is_none_or(|best| arrival < best) {
+                        best_arrival = Some(arrival);
+                    }
                     journeys.push(journey);
                 }
                 continue;
