@@ -100,6 +100,28 @@
     <!-- Search results will be inserted here -->
 </div>
 
+<!-- Destination Modal -->
+<div id="destination-modal" class="modal-overlay" hidden>
+    <div class="modal-content">
+        <h3>Enter Your Destination</h3>
+        <div class="form-group">
+            <label for="modal-destination">Final Destination</label>
+            <div class="autocomplete-wrapper">
+                <input type="text" id="modal-destination"
+                       placeholder="e.g. BRI or Bristol Temple Meads"
+                       autocomplete="off"
+                       data-autocomplete="station">
+                <div class="autocomplete-dropdown" data-for="modal-destination"></div>
+            </div>
+            <p class="hint">Where you want to end up</p>
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="modal-cancel">Cancel</button>
+            <button type="button" class="btn btn-primary" id="modal-confirm">Plan Journey</button>
+        </div>
+    </div>
+</div>
+
 <div class="poster-banner">
     <p>Where will the railway take you today?</p>
 </div>
@@ -450,49 +472,172 @@
         });
     }
 
+    // ========================================
+    // DESTINATION MODAL
+    // ========================================
+
+    const destinationModal = document.getElementById('destination-modal');
+    const modalDestinationInput = document.getElementById('modal-destination');
+    const modalCancelBtn = document.getElementById('modal-cancel');
+    const modalConfirmBtn = document.getElementById('modal-confirm');
+    const modalDropdown = document.querySelector('.autocomplete-dropdown[data-for="modal-destination"]');
+
+    // Store pending journey request data
+    let pendingJourneyRequest = null;
+
+    // Initialize autocomplete on modal input
+    modalDestinationInput.addEventListener('input', handleInput);
+    modalDestinationInput.addEventListener('keydown', handleKeydown);
+
+    // Handle Enter key to submit modal
+    modalDestinationInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            const state = autocompleteState.get('modal-destination');
+            // Only submit if no dropdown selection is active
+            if (!state || state.selectedIndex < 0) {
+                e.preventDefault();
+                submitJourneyFromModal();
+            }
+        }
+    });
+
+    // Initialize modal dropdown click/keyboard handlers
+    modalDropdown.addEventListener('click', handleDropdownClick);
+    modalDropdown.addEventListener('keydown', function(e) {
+        const item = e.target.closest('.autocomplete-item');
+        if (!item) return;
+
+        const items = Array.from(modalDropdown.querySelectorAll('.autocomplete-item'));
+        const currentIndex = items.indexOf(item);
+
+        if (e.key === 'Tab') {
+            items.forEach(function(i) { i.removeAttribute('tabindex'); });
+        } else if (e.key === 'ArrowDown' && currentIndex < items.length - 1) {
+            e.preventDefault();
+            items[currentIndex + 1].focus();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (currentIndex > 0) {
+                items[currentIndex - 1].focus();
+            } else {
+                modalDestinationInput.focus();
+            }
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            modalDestinationInput.value = item.dataset.crs + ' (' + item.dataset.name + ')';
+            modalDropdown.innerHTML = '';
+            autocompleteState.delete('modal-destination');
+            modalDestinationInput.focus();
+        } else if (e.key === 'Escape') {
+            modalDropdown.innerHTML = '';
+            autocompleteState.delete('modal-destination');
+            modalDestinationInput.focus();
+        }
+    });
+
+    // Auto-select when focus leaves the modal autocomplete wrapper
+    const modalAutocompleteWrapper = modalDestinationInput.closest('.autocomplete-wrapper');
+    modalAutocompleteWrapper.addEventListener('focusout', function(e) {
+        if (e.relatedTarget && modalAutocompleteWrapper.contains(e.relatedTarget)) {
+            return;
+        }
+        setTimeout(function() {
+            const state = autocompleteState.get('modal-destination');
+            if (state) {
+                tryAutoSelect(modalDestinationInput, state);
+                modalDropdown.innerHTML = '';
+                autocompleteState.delete('modal-destination');
+            }
+        }, 50);
+    });
+
+    function showDestinationModal(serviceId, positionIdx, boardStation) {
+        pendingJourneyRequest = { serviceId: serviceId, positionIdx: positionIdx, boardStation: boardStation };
+        modalDestinationInput.value = '';
+        modalDropdown.innerHTML = '';
+        autocompleteState.delete('modal-destination');
+        destinationModal.hidden = false;
+        modalDestinationInput.focus();
+    }
+
+    function hideDestinationModal() {
+        destinationModal.hidden = true;
+        pendingJourneyRequest = null;
+        modalDropdown.innerHTML = '';
+        autocompleteState.delete('modal-destination');
+    }
+
+    function submitJourneyFromModal() {
+        if (!pendingJourneyRequest) return;
+
+        const destination = modalDestinationInput.value.trim();
+        if (!destination) {
+            modalDestinationInput.focus();
+            return;
+        }
+
+        const { serviceId, positionIdx, boardStation } = pendingJourneyRequest;
+        hideDestinationModal();
+
+        // Show loading
+        resultsContainer.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p class="loading-text">Planning your journey...</p></div>';
+
+        // Submit journey plan request
+        fetch('/journey/plan', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/html'
+            },
+            body: JSON.stringify({
+                service_id: serviceId,
+                position: parseInt(positionIdx),
+                destination: extractCrs(destination),
+                board_station: boardStation
+            })
+        })
+        .then(function(response) {
+            if (!response.ok) {
+                return response.text().then(function(text) {
+                    throw new Error(text);
+                });
+            }
+            return response.text();
+        })
+        .then(function(html) {
+            resultsContainer.innerHTML = html;
+        })
+        .catch(function(error) {
+            resultsContainer.innerHTML = '<div class="error-message"><h3>Planning Failed</h3><p>' + (error.message || 'Unable to plan journey. Please try again.') + '</p></div>';
+        });
+    }
+
+    modalCancelBtn.addEventListener('click', hideDestinationModal);
+    modalConfirmBtn.addEventListener('click', submitJourneyFromModal);
+
+    // Close modal on overlay click (but not on content click)
+    destinationModal.addEventListener('click', function(e) {
+        if (e.target === destinationModal) {
+            hideDestinationModal();
+        }
+    });
+
+    // Close modal on Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && !destinationModal.hidden) {
+            hideDestinationModal();
+        }
+    });
+
     // Handle position selection for journey planning
     document.addEventListener('click', function(e) {
         if (e.target.classList.contains('select-position-btn')) {
             const btn = e.target;
-            const serviceId = btn.dataset.serviceId;
-            const positionIdx = btn.dataset.positionIdx;
-            const boardStation = btn.dataset.boardStation;
-
-            // Show destination prompt
-            const destination = prompt('Enter your final destination (station code or name):');
-            if (!destination) return;
-
-            // Show loading
-            resultsContainer.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p class="loading-text">Planning your journey...</p></div>';
-
-            // Submit journey plan request
-            fetch('/journey/plan', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'text/html'
-                },
-                body: JSON.stringify({
-                    service_id: serviceId,
-                    position: parseInt(positionIdx),
-                    destination: destination.trim(),
-                    board_station: boardStation
-                })
-            })
-            .then(function(response) {
-                if (!response.ok) {
-                    return response.text().then(function(text) {
-                        throw new Error(text);
-                    });
-                }
-                return response.text();
-            })
-            .then(function(html) {
-                resultsContainer.innerHTML = html;
-            })
-            .catch(function(error) {
-                resultsContainer.innerHTML = '<div class="error-message"><h3>Planning Failed</h3><p>' + (error.message || 'Unable to plan journey. Please try again.') + '</p></div>';
-            });
+            showDestinationModal(
+                btn.dataset.serviceId,
+                btn.dataset.positionIdx,
+                btn.dataset.boardStation
+            );
         }
     });
 })();
