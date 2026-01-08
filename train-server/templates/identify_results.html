@@ -112,9 +112,10 @@
         {% endif %}
 
         <div class="calling-points">
+            <p class="calling-points-summary">{{ m.service.calling_points_summary() }}</p>
             <button type="button" class="calling-points-toggle">
                 <span class="arrow">&#9654;</span>
-                Show calling points ({{ m.service.calls.len() }} stops)
+                Show times
             </button>
 
             <div class="calling-points-list">

@@ -87,6 +87,21 @@ impl ServiceView {
             .is_some_and(|exp| exp != &self.scheduled_departure)
     }
 
+    /// Returns a formatted summary of calling points, e.g.
+    /// "Calling at Crewe, Wilmslow, Stockport, and Manchester Piccadilly"
+    pub fn calling_points_summary(&self) -> String {
+        let names: Vec<&str> = self.calls.iter().map(|c| c.name.as_str()).collect();
+        match names.len() {
+            0 => String::new(),
+            1 => format!("Calling at {}", names[0]),
+            2 => format!("Calling at {} and {}", names[0], names[1]),
+            _ => {
+                let (last, rest) = names.split_last().unwrap();
+                format!("Calling at {}, and {}", rest.join(", "), last)
+            }
+        }
+    }
+
     /// Create from a domain Service.
     pub fn from_service(service: &Service) -> Self {
         let calls: Vec<CallView> = service
