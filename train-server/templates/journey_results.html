@@ -59,7 +59,7 @@
                         {% if leg.is_current_train %}
                         Stay on this train
                         {% else %}
-                        Board{% if let Some(platform) = leg.origin.platform %} from platform {{ platform }}{% endif %}
+                        Board from platform {% if let Some(platform) = leg.origin.platform %}{{ platform }}{% else %}TBC{% endif %}
                         {% endif %}
                     </div>
                 </div>
@@ -83,9 +83,9 @@
                     </div>
                     <div class="station-action">
                         {% if leg.is_current_train %}
-                        Alight{% if let Some(platform) = leg.destination.platform %} at platform {{ platform }}{% endif %}
+                        Alight at platform {% if let Some(platform) = leg.destination.platform %}{{ platform }}{% else %}TBC{% endif %}
                         {% else %}
-                        Arrive{% if let Some(platform) = leg.destination.platform %} at platform {{ platform }}{% endif %}
+                        Arrive at platform {% if let Some(platform) = leg.destination.platform %}{{ platform }}{% else %}TBC{% endif %}
                         {% endif %}
                     </div>
                 </div>
