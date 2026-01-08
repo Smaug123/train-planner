@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Duration;
+use futures::future::join_all;
 use tracing::{debug, info, instrument, trace};
 
 use super::arrivals_index::ArrivalsIndex;
@@ -452,7 +453,6 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         departures_cache: &mut HashMap<Crs, Vec<Arc<Service>>>,
     ) -> Result<(Vec<Journey>, usize), SearchError> {
         let mut journeys = Vec::new();
-        let mut api_calls = 0;
 
         let train = &request.current_service;
         let pos = request.current_position.0;
@@ -461,10 +461,10 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         let max_walk = self.config.max_walk();
         let start_time = match request.current_time() {
             Some(t) => t,
-            None => return Ok((journeys, api_calls)),
+            None => return Ok((journeys, 0)),
         };
 
-        // Collect stations to query (current train stops that aren't feeder stations)
+        // Collect stations to query (all stops on current train, including feeders)
         // Also include walkable stations from each stop
         let mut stations_to_query: Vec<(usize, Crs, Duration)> = Vec::new();
 
@@ -478,14 +478,14 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                 continue;
             }
 
-            // Check the station itself if it's NOT a feeder (feeders handled by 1-change)
-            if !index.is_feeder(&alight_call.station) {
-                stations_to_query.push((alight_idx, alight_call.station, Duration::zero()));
-            }
+            // Include ALL stations (including feeders) for 2-change exploration.
+            // Even if a station is a feeder, we need to explore 2-change paths through it
+            // because the 1-change via that feeder might be rejected (too long, bad timing).
+            stations_to_query.push((alight_idx, alight_call.station, Duration::zero()));
 
-            // Check walkable neighbours that aren't feeders
+            // Also check walkable neighbours
             for (walkable_station, walk_time) in self.walkable.walkable_from(&alight_call.station) {
-                if walk_time <= max_walk && !index.is_feeder(&walkable_station) {
+                if walk_time <= max_walk {
                     stations_to_query.push((alight_idx, walkable_station, walk_time));
                 }
             }
@@ -501,12 +501,27 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         });
         stations_to_query.dedup_by(|a, b| a.1 == b.1);
 
+        // Collect unique stations that need fetching (not in cache)
+        let uncached_stations: Vec<Crs> = stations_to_query
+            .iter()
+            .map(|(_, station, _)| *station)
+            .filter(|s| !departures_cache.contains_key(s))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
         debug!(
-            stations = stations_to_query.len(),
-            "Querying departures for 2-change search"
+            total_stations = stations_to_query.len(),
+            uncached = uncached_stations.len(),
+            "Fetching departures for 2-change search"
         );
 
-        // Query departures from each non-feeder station
+        // Batch fetch departures in parallel
+        let api_calls = self
+            .batch_fetch_departures(&uncached_stations, start_time, departures_cache)
+            .await;
+
+        // Now process synchronously using the cache
         for (alight_idx, query_station, walk_to_query) in stations_to_query {
             let alight_call = &train.calls[alight_idx];
 
@@ -521,34 +536,16 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
             // Time when we're available to board at the query station
             let available_at_query = arrival_at_alight + walk_to_query + min_connection;
 
-            // Fetch departures from this station (use cache)
-            let departures = if let Some(cached) = departures_cache.get(&query_station) {
-                cached.clone()
-            } else {
-                let deps = match self
-                    .provider
-                    .get_departures(&query_station, available_at_query)
-                    .await
-                {
-                    Ok(deps) => deps,
-                    Err(e) => {
-                        debug!(
-                            station = %query_station.as_str(),
-                            error = %e,
-                            "Failed to fetch departures, skipping"
-                        );
-                        continue;
-                    }
-                };
-                api_calls += 1;
-                departures_cache.insert(query_station, deps.clone());
-                deps
-            };
+            // Get departures from cache
+            let departures = departures_cache
+                .get(&query_station)
+                .cloned()
+                .unwrap_or_default();
 
             trace!(
                 station = %query_station.as_str(),
                 departures = departures.len(),
-                "Got departures for 2-change search"
+                "Processing departures for 2-change search"
             );
 
             // Check each departing service for connections to feeder stations
@@ -562,6 +559,16 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                     Some(idx) => idx,
                     None => continue,
                 };
+
+                // Check if service departs after we're available
+                let bridge_board_call = &bridge_service.calls[bridge_board_idx];
+                let bridge_depart = match bridge_board_call.expected_departure() {
+                    Some(t) => t,
+                    None => continue,
+                };
+                if bridge_depart < available_at_query {
+                    continue;
+                }
 
                 // For each call on the bridge service AFTER where we board
                 for (bridge_alight_idx, bridge_call) in bridge_service
@@ -637,6 +644,56 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         }
 
         Ok((journeys, api_calls))
+    }
+
+    /// Batch fetch departures for multiple stations in parallel.
+    ///
+    /// Fetches departures for all given stations, respecting `batch_size` for
+    /// parallelism. Results are inserted into the cache. Returns the number
+    /// of API calls made.
+    async fn batch_fetch_departures(
+        &self,
+        stations: &[Crs],
+        after: RailTime,
+        cache: &mut HashMap<Crs, Vec<Arc<Service>>>,
+    ) -> usize {
+        if stations.is_empty() {
+            return 0;
+        }
+
+        let mut api_calls = 0;
+
+        for batch in stations.chunks(self.config.batch_size) {
+            let futures: Vec<_> = batch
+                .iter()
+                .map(|station| async move {
+                    let result = self.provider.get_departures(station, after).await;
+                    (*station, result)
+                })
+                .collect();
+
+            let results = join_all(futures).await;
+
+            for (station, result) in results {
+                api_calls += 1;
+                match result {
+                    Ok(deps) => {
+                        cache.insert(station, deps);
+                    }
+                    Err(e) => {
+                        debug!(
+                            station = %station.as_str(),
+                            error = %e,
+                            "Failed to fetch departures, using empty"
+                        );
+                        // Insert empty vec so we don't retry
+                        cache.insert(station, vec![]);
+                    }
+                }
+            }
+        }
+
+        api_calls
     }
 
     /// Build a 2-change journey from components.
@@ -734,8 +791,7 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
             changes_so_far: usize,
         }
 
-        // Track visited (station, time) to avoid cycles
-        // We use a set of stations already in the partial journey's path
+        // Track visited (station, change_level) to avoid redundant exploration
         let mut visited_states: HashSet<(Crs, usize)> = HashSet::new();
 
         // Initialize frontier with all stations on current train
@@ -795,11 +851,12 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
 
         // BFS: explore level by level (each level = one more change)
         while !frontier.is_empty() {
-            let mut next_frontier: Vec<BfsState> = Vec::new();
+            // First pass: filter frontier and collect stations needing departure fetches
+            let mut valid_states: Vec<BfsState> = Vec::new();
+            let mut stations_to_fetch: HashSet<Crs> = HashSet::new();
 
             for state in frontier {
                 // Check if we've exceeded max changes
-                // Note: changes_so_far counts changes completed; we're about to make another
                 if state.changes_so_far >= self.config.max_changes {
                     continue;
                 }
@@ -818,17 +875,14 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                 visited_states.insert(state_key);
 
                 // If this station is a feeder, complete journey via ArrivalsIndex
-                // (This is the key optimization)
                 if index.is_feeder(&state.station) {
                     for feeder in index.feeders_at(&state.station) {
-                        // state.available_time already includes min_connection buffer
-                        // So we just need: feeder.board_time >= state.available_time
                         let time_until_feeder = feeder
                             .board_time
                             .signed_duration_since(state.available_time);
 
                         if time_until_feeder < Duration::zero() {
-                            continue; // Feeder departs before we're available
+                            continue;
                         }
 
                         let total_duration = feeder.dest_arrival.signed_duration_since(start_time);
@@ -836,8 +890,6 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                             continue;
                         }
 
-                        // Build final leg to destination
-                        // Note: service may continue past destination, so find actual call
                         let alight_idx = match feeder
                             .service
                             .calls
@@ -863,22 +915,32 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                             journeys.push(journey);
                         }
                     }
-                    // Don't continue exploring from feeders - we've completed the journey
+                    // Don't explore further from feeders
                     continue;
                 }
 
-                // Fetch departures from this station (use cache)
-                let departures = if let Some(cached) = departures_cache.get(&state.station) {
-                    cached.clone()
-                } else {
-                    let deps = self
-                        .provider
-                        .get_departures(&state.station, state.available_time)
-                        .await?;
-                    api_calls += 1;
-                    departures_cache.insert(state.station, deps.clone());
-                    deps
-                };
+                // Need to fetch departures for this station (if not cached)
+                if !departures_cache.contains_key(&state.station) {
+                    stations_to_fetch.insert(state.station);
+                }
+                valid_states.push(state);
+            }
+
+            // Batch fetch departures for all non-cached stations in parallel
+            let stations_vec: Vec<Crs> = stations_to_fetch.into_iter().collect();
+            let batch_calls = self
+                .batch_fetch_departures(&stations_vec, start_time, departures_cache)
+                .await;
+            api_calls += batch_calls;
+
+            // Now process valid states using cached departures
+            let mut next_frontier: Vec<BfsState> = Vec::new();
+
+            for state in valid_states {
+                let departures = departures_cache
+                    .get(&state.station)
+                    .cloned()
+                    .unwrap_or_default();
 
                 trace!(
                     station = %state.station.as_str(),
@@ -889,7 +951,6 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
 
                 // Explore each departing service
                 for service in &departures {
-                    // Find where we board
                     let board_idx = match service
                         .calls
                         .iter()
@@ -905,12 +966,10 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                         None => continue,
                     };
 
-                    // Check if we can make this connection
                     if board_time < state.available_time {
                         continue;
                     }
 
-                    // Build leg for this service
                     for (alight_idx, alight_call) in
                         service.calls.iter().enumerate().skip(board_idx + 1)
                     {
@@ -918,9 +977,8 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                             continue;
                         }
 
-                        // Skip destination (would be direct from feeder)
+                        // If we reach destination directly, that's a valid journey
                         if alight_call.station == request.destination {
-                            // Actually, if we reach destination directly, that's a valid journey!
                             let leg = match Leg::new(
                                 service.clone(),
                                 CallIndex(board_idx),
@@ -947,13 +1005,11 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                             None => continue,
                         };
 
-                        // Check journey time limit
                         let total_so_far = arrival_time.signed_duration_since(start_time);
                         if total_so_far > max_journey {
                             continue;
                         }
 
-                        // Build new state
                         let leg = match Leg::new(
                             service.clone(),
                             CallIndex(board_idx),
@@ -1202,8 +1258,8 @@ mod tests {
         assert_eq!(journey.origin(), &crs("PAD"));
         assert_eq!(journey.destination(), &crs("BRI"));
 
-        // API calls: 1 arrivals + 1 departures from PAD (non-feeder station for 2-change)
-        assert_eq!(result.routes_explored, 2);
+        // API calls: 1 arrivals + 2 departures (PAD and RDG for 2-change exploration)
+        assert_eq!(result.routes_explored, 3);
     }
 
     #[tokio::test]
@@ -1496,11 +1552,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feeder_stations_skipped_for_two_change() {
+    async fn feeder_stations_also_explored_for_two_change() {
         // Current train: PAD -> RDG
         // RDG is a feeder station (has service to BRI)
-        // Should NOT query departures from RDG (handled by 1-change)
-        // But PAD is NOT a feeder, so departures from PAD will be queried
+        // We still query departures from RDG for 2-change exploration
+        // (because 1-change via RDG might be rejected due to timing)
         let current_train = make_service(
             "CT",
             &[
@@ -1519,8 +1575,6 @@ mod tests {
 
         let mut provider = MockProvider::new();
         provider.add_arrivals(crs("BRI"), vec![arriving_service]);
-        // Don't add departures - if it queries RDG, test would still pass
-        // but we verify via API call count
 
         let walkable = WalkableConnections::new();
         let config = SearchConfig::default();
@@ -1530,17 +1584,17 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
         let result = planner.search(&request).await.unwrap();
 
-        // API calls: 1 arrivals + 1 departures from PAD (non-feeder)
-        // RDG is a feeder, so it's skipped for 2-change search
-        assert_eq!(result.routes_explored, 2);
+        // API calls: 1 arrivals + 2 departures (PAD and RDG)
+        // Feeder stations are now explored for 2-change in case 1-change is rejected
+        assert_eq!(result.routes_explored, 3);
         // And should still find the 1-change journey
         assert!(!result.journeys.is_empty());
     }
 
     #[tokio::test]
-    async fn feeder_station_skipped_when_only_feeder_on_train() {
-        // Test that truly verifies feeder stations are skipped:
-        // User boards at RDG (which is a feeder), so no departures should be queried
+    async fn all_stops_explored_for_two_change_even_when_feeders() {
+        // Even when all stops on the train are feeders, we still explore them
+        // for 2-change journeys (in case 1-change is rejected due to timing)
         let current_train = make_service(
             "CT",
             &[
@@ -1570,8 +1624,9 @@ mod tests {
         let planner = Planner::new(&provider, &walkable, &config);
         let result = planner.search(&request).await.unwrap();
 
-        // API calls: only 1 arrivals - both RDG and SWI are feeders, skipped for 2-change
-        assert_eq!(result.routes_explored, 1);
+        // API calls: 1 arrivals + 2 departures (RDG and SWI)
+        // Both are feeders but we still explore them for 2-change
+        assert_eq!(result.routes_explored, 3);
         // Should find 1-change journeys (RDG->BRI or SWI->BRI connections)
         assert!(!result.journeys.is_empty());
     }
