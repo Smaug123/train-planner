@@ -927,6 +927,12 @@ input[type="text"]::placeholder {
     color: var(--warm-grey);
 }
 
+.station-action {
+    font-size: 0.8125rem;
+    color: var(--warm-grey);
+    font-style: italic;
+}
+
 /* Train segment details */
 .segment-train {
     background: var(--cream);

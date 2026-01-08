@@ -55,9 +55,9 @@
                         <span class="station-name">{{ leg.origin.name }}</span>
                         <span class="station-time">{{ leg.origin.time }}</span>
                     </div>
-                    {% if let Some(platform) = leg.origin.platform %}
-                    <div class="station-platform">Platform {{ platform }}</div>
-                    {% endif %}
+                    <div class="station-action">
+                        Depart{% if let Some(platform) = leg.origin.platform %} from platform {{ platform }}{% endif %}
+                    </div>
                 </div>
 
                 <div class="segment-train">
@@ -77,9 +77,9 @@
                         <span class="station-name">{{ leg.destination.name }}</span>
                         <span class="station-time">{{ leg.destination.time }}</span>
                     </div>
-                    {% if let Some(platform) = leg.destination.platform %}
-                    <div class="station-platform">Platform {{ platform }}</div>
-                    {% endif %}
+                    <div class="station-action">
+                        Arrive{% if let Some(platform) = leg.destination.platform %} at platform {{ platform }}{% endif %}
+                    </div>
                 </div>
             </div>
 
