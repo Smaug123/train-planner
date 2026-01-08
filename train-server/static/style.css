@@ -760,6 +760,17 @@ input[type="text"]::placeholder {
     padding: 0.375rem 0.75rem;
 }
 
+/* Confirm train button row (for identify mode) */
+.confirm-train-row {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--cream-dark);
+}
+
+.confirm-train-row .btn {
+    width: 100%;
+}
+
 /* ========================================
    JOURNEY RESULTS
    ======================================== */
