@@ -196,10 +196,18 @@ pub struct JourneyView {
 impl JourneyView {
     /// Create from a domain Journey.
     pub fn from_journey(journey: &Journey) -> Self {
+        // Track whether we've seen the first train leg (the user's current train).
+        let mut seen_first_train = false;
         let segments: Vec<SegmentView> = journey
             .segments()
             .iter()
-            .map(SegmentView::from_segment)
+            .map(|segment| {
+                let is_first_train = matches!(segment, Segment::Train(_)) && !seen_first_train;
+                if is_first_train {
+                    seen_first_train = true;
+                }
+                SegmentView::from_segment(segment, is_first_train)
+            })
             .collect();
 
         let duration = journey.total_duration();
@@ -231,9 +239,11 @@ pub enum SegmentView {
 
 impl SegmentView {
     /// Create from a domain Segment.
-    pub fn from_segment(segment: &Segment) -> Self {
+    ///
+    /// `is_first_train` indicates this is the first train leg (the train the user is already on).
+    pub fn from_segment(segment: &Segment, is_first_train: bool) -> Self {
         match segment {
-            Segment::Train(leg) => SegmentView::Train(LegView::from_leg(leg)),
+            Segment::Train(leg) => SegmentView::Train(LegView::from_leg(leg, is_first_train)),
             Segment::Walk(walk) => SegmentView::Walk(WalkView::from_walk(walk)),
         }
     }
@@ -247,11 +257,15 @@ pub struct LegView {
     pub origin: StationView,
     pub destination: StationView,
     pub stops: usize,
+    /// Whether this is the train the user is currently on (first leg).
+    pub is_current_train: bool,
 }
 
 impl LegView {
     /// Create from a domain Leg.
-    pub fn from_leg(leg: &crate::domain::Leg) -> Self {
+    ///
+    /// `is_current_train` indicates this is the first leg (the train the user is already on).
+    pub fn from_leg(leg: &crate::domain::Leg, is_current_train: bool) -> Self {
         let origin = StationView {
             crs: leg.board_call().station.as_str().to_string(),
             name: leg.board_call().station_name.clone(),
@@ -283,6 +297,7 @@ impl LegView {
             origin,
             destination,
             stops,
+            is_current_train,
         }
     }
 }

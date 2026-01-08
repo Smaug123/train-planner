@@ -49,14 +49,18 @@
             {% for segment in journey.segments %}
             {% match segment %}
             {% when SegmentView::Train with (leg) %}
-            <div class="segment train">
+            <div class="segment train{% if leg.is_current_train %} current-train{% endif %}">
                 <div class="segment-station origin">
                     <div class="station-info">
                         <span class="station-name">{{ leg.origin.name }}</span>
                         <span class="station-time">{{ leg.origin.time }}</span>
                     </div>
                     <div class="station-action">
-                        Depart{% if let Some(platform) = leg.origin.platform %} from platform {{ platform }}{% endif %}
+                        {% if leg.is_current_train %}
+                        Stay on this train
+                        {% else %}
+                        Board{% if let Some(platform) = leg.origin.platform %} from platform {{ platform }}{% endif %}
+                        {% endif %}
                     </div>
                 </div>
 
@@ -78,7 +82,11 @@
                         <span class="station-time">{{ leg.destination.time }}</span>
                     </div>
                     <div class="station-action">
+                        {% if leg.is_current_train %}
+                        Alight{% if let Some(platform) = leg.destination.platform %} at platform {{ platform }}{% endif %}
+                        {% else %}
                         Arrive{% if let Some(platform) = leg.destination.platform %} at platform {{ platform }}{% endif %}
+                        {% endif %}
                     </div>
                 </div>
             </div>
