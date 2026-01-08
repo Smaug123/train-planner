@@ -606,6 +606,10 @@
         })
         .then(function(html) {
             resultsContainer.innerHTML = html;
+            var banner = document.getElementById('poster-banner');
+            if (banner) {
+                banner.querySelector('p').textContent = 'Safe travels on your continuing journey!';
+            }
         })
         .catch(function(error) {
             resultsContainer.innerHTML = '<div class="error-message"><h3>Planning Failed</h3><p>' + (error.message || 'Unable to plan journey. Please try again.') + '</p></div>';
