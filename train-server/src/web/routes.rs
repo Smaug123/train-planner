@@ -540,11 +540,9 @@ impl crate::planner::ServiceProvider for CachedServiceProvider {
         // Darwin constraints:
         // - time_offset must be in range [-120, 120]
         // - time_offset + time_window must not exceed ~120 (Darwin rejects larger ranges)
-        let current_time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(
-            self.current_mins as u32 * 60,
-            0,
-        )
-        .unwrap_or_default();
+        let current_time =
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(self.current_mins as u32 * 60, 0)
+                .unwrap_or_default();
         let now = crate::domain::RailTime::new(self.date, current_time);
         let offset_mins = after.signed_duration_since(now).num_minutes();
 
@@ -559,7 +557,13 @@ impl crate::planner::ServiceProvider for CachedServiceProvider {
 
         let services = self
             .darwin
-            .get_departures_with_details(station, self.date, self.current_mins, time_offset, time_window)
+            .get_departures_with_details(
+                station,
+                self.date,
+                self.current_mins,
+                time_offset,
+                time_window,
+            )
             .await
             .map_err(|e| SearchError::FetchError {
                 station: *station,
