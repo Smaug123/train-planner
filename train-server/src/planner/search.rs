@@ -3,9 +3,10 @@
 //! Finds possible routes from a position on a train to a destination,
 //! exploring connections via train changes and walking.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use futures::future::join_all;
 use tracing::{debug, info, instrument, trace, warn};
 
 use crate::domain::{CallIndex, Crs, Journey, Leg, RailTime, Segment, Service, Walk};
@@ -131,6 +132,22 @@ struct SearchState {
     used_services: HashSet<String>,
 }
 
+/// Key for deduplicating departure fetches.
+/// States at the same station in the same time bucket can share a fetch.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct FetchKey {
+    station: Crs,
+    /// 10-minute bucket, aligned with cache bucketing.
+    time_bucket: i64,
+}
+
+/// A search state pending departure fetch, along with its fetch key.
+struct PendingState {
+    state: SearchState,
+    fetch_key: FetchKey,
+    min_departure: RailTime,
+}
+
 impl SearchState {
     /// Create initial states from alighting at subsequent stops on current train.
     fn initial_states(request: &SearchRequest) -> Vec<Self> {
@@ -249,147 +266,240 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         // Track visited (station, time bucket) to avoid redundant exploration
         let mut visited: HashSet<(Crs, i64)> = HashSet::new();
 
-        while let Some(state) = queue.pop_front() {
-            routes_explored += 1;
+        // Batched parallel fetch: collect states, fetch departures in parallel, process results
+        while !queue.is_empty() {
+            // Phase 1: Collect batch of states that need departure fetches
+            let mut batch: Vec<PendingState> = Vec::with_capacity(self.config.batch_size);
+            // Track earliest min_departure per fetch key for deduplication
+            let mut fetch_requests: HashMap<FetchKey, RailTime> = HashMap::new();
+            let mut hit_route_limit = false;
 
-            // Pruning: skip if we can't possibly beat the best arrival time
-            // (we're already at or past the best known arrival)
-            if best_arrival.is_some_and(|best| state.time >= best) {
-                trace!(
-                    station = %state.station.as_str(),
-                    time = %state.time,
-                    "Pruned: can't beat best arrival time"
-                );
-                continue;
-            }
+            while let Some(state) = queue.pop_front() {
+                routes_explored += 1;
 
-            // Check if at destination
-            if state.at_destination(&request.destination) {
-                if let Some(journey) = state.to_journey() {
-                    let arrival = journey.arrival_time();
-                    debug!(
-                        changes = journey.change_count(),
-                        arrival = %arrival,
-                        "Found journey to destination"
+                // Pruning: skip if we can't possibly beat the best arrival time
+                if best_arrival.is_some_and(|best| state.time >= best) {
+                    trace!(
+                        station = %state.station.as_str(),
+                        time = %state.time,
+                        "Pruned: can't beat best arrival time"
                     );
-                    // Update best arrival if this is better
-                    if best_arrival.is_none_or(|best| arrival < best) {
-                        best_arrival = Some(arrival);
-                    }
-                    journeys.push(journey);
-                }
-                continue;
-            }
-
-            // Pruning: check max changes
-            if state.changes >= self.config.max_changes {
-                trace!(
-                    station = %state.station.as_str(),
-                    changes = state.changes,
-                    "Pruned: max changes exceeded"
-                );
-                continue;
-            }
-
-            // Pruning: check journey time
-            let journey_so_far = state.time.signed_duration_since(
-                state
-                    .segments
-                    .first()
-                    .map(|s| match s {
-                        Segment::Train(leg) => leg.departure_time(),
-                        Segment::Walk(_) => state.time, // First segment is always Train
-                    })
-                    .unwrap_or(state.time),
-            );
-            if journey_so_far > self.config.max_journey() {
-                trace!(
-                    station = %state.station.as_str(),
-                    duration = ?journey_so_far,
-                    "Pruned: max journey time exceeded"
-                );
-                continue;
-            }
-
-            // Deduplicate by (station, time bucket)
-            let time_bucket = state.time.to_datetime().and_utc().timestamp() / 300; // 5-min buckets
-            if !visited.insert((state.station, time_bucket)) {
-                trace!(
-                    station = %state.station.as_str(),
-                    "Pruned: already visited this station/time"
-                );
-                continue;
-            }
-
-            // Limit total exploration
-            if routes_explored > 10000 {
-                warn!("Search terminated: exceeded 10000 routes explored");
-                break;
-            }
-
-            // Get departures from this station
-            let min_departure = state.time + self.config.min_connection();
-            debug!(
-                station = %state.station.as_str(),
-                time = %state.time,
-                min_departure = %min_departure,
-                changes = state.changes,
-                "Exploring station"
-            );
-
-            let departures = self
-                .provider
-                .get_departures(&state.station, min_departure)
-                .await?;
-
-            debug!(
-                station = %state.station.as_str(),
-                departures = departures.len(),
-                "Got departures"
-            );
-
-            // Explore each departure
-            for service in departures {
-                // Skip if we've already used this service
-                if state.used_services.contains(&service.service_ref.darwin_id) {
                     continue;
                 }
 
-                // Find where we can board this service
-                let board_idx = match service.find_call(&state.station, CallIndex(0)) {
-                    Some((idx, call)) => {
-                        // Check departure time is after our arrival + min connection
-                        if let Some(dep) = call.expected_departure() {
-                            if dep >= min_departure {
-                                idx
+                // Check if at destination
+                if state.at_destination(&request.destination) {
+                    if let Some(journey) = state.to_journey() {
+                        let arrival = journey.arrival_time();
+                        debug!(
+                            changes = journey.change_count(),
+                            arrival = %arrival,
+                            "Found journey to destination"
+                        );
+                        if best_arrival.is_none_or(|best| arrival < best) {
+                            best_arrival = Some(arrival);
+                        }
+                        journeys.push(journey);
+                    }
+                    continue;
+                }
+
+                // Pruning: check max changes
+                if state.changes >= self.config.max_changes {
+                    trace!(
+                        station = %state.station.as_str(),
+                        changes = state.changes,
+                        "Pruned: max changes exceeded"
+                    );
+                    continue;
+                }
+
+                // Pruning: check journey time
+                let journey_so_far = state.time.signed_duration_since(
+                    state
+                        .segments
+                        .first()
+                        .map(|s| match s {
+                            Segment::Train(leg) => leg.departure_time(),
+                            Segment::Walk(_) => state.time,
+                        })
+                        .unwrap_or(state.time),
+                );
+                if journey_so_far > self.config.max_journey() {
+                    trace!(
+                        station = %state.station.as_str(),
+                        duration = ?journey_so_far,
+                        "Pruned: max journey time exceeded"
+                    );
+                    continue;
+                }
+
+                // Deduplicate by (station, time bucket)
+                let time_bucket = state.time.to_datetime().and_utc().timestamp() / 300; // 5-min buckets
+                if !visited.insert((state.station, time_bucket)) {
+                    trace!(
+                        station = %state.station.as_str(),
+                        "Pruned: already visited this station/time"
+                    );
+                    continue;
+                }
+
+                // Limit total exploration
+                if routes_explored > 10000 {
+                    warn!("Search terminated: exceeded 10000 routes explored");
+                    hit_route_limit = true;
+                    break;
+                }
+
+                // This state needs a fetch - add to batch
+                let min_departure = state.time + self.config.min_connection();
+                // Use 10-minute buckets for fetch deduplication, aligned with cache bucketing
+                let cache_bucket = min_departure.to_datetime().and_utc().timestamp() / 600;
+                let fetch_key = FetchKey {
+                    station: state.station,
+                    time_bucket: cache_bucket,
+                };
+
+                debug!(
+                    station = %state.station.as_str(),
+                    time = %state.time,
+                    min_departure = %min_departure,
+                    changes = state.changes,
+                    "Exploring station"
+                );
+
+                // Track earliest min_departure for this fetch key
+                fetch_requests
+                    .entry(fetch_key.clone())
+                    .and_modify(|existing| {
+                        if min_departure < *existing {
+                            *existing = min_departure;
+                        }
+                    })
+                    .or_insert(min_departure);
+
+                batch.push(PendingState {
+                    state,
+                    fetch_key,
+                    min_departure,
+                });
+
+                if batch.len() >= self.config.batch_size {
+                    break;
+                }
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            // Phase 2: Fetch departures in parallel (deduplicated by fetch key)
+            let fetch_futures: Vec<_> = fetch_requests
+                .iter()
+                .map(|(key, &min_dep)| {
+                    let station = key.station;
+                    let provider = self.provider;
+                    async move {
+                        let result = provider.get_departures(&station, min_dep).await;
+                        (station, key.time_bucket, result)
+                    }
+                })
+                .collect();
+
+            let fetch_results: Vec<_> = join_all(fetch_futures).await;
+
+            // Build lookup map from fetch results
+            let departures_by_key: HashMap<FetchKey, Result<Vec<Arc<Service>>, SearchError>> =
+                fetch_results
+                    .into_iter()
+                    .map(|(station, time_bucket, result)| {
+                        (
+                            FetchKey {
+                                station,
+                                time_bucket,
+                            },
+                            result,
+                        )
+                    })
+                    .collect();
+
+            // Phase 3: Process each state's departures
+            for pending in batch {
+                let PendingState {
+                    state,
+                    fetch_key,
+                    min_departure,
+                } = pending;
+
+                // Re-check best_arrival (may have improved during batch processing)
+                if best_arrival.is_some_and(|best| state.time >= best) {
+                    trace!(
+                        station = %state.station.as_str(),
+                        "Pruned post-fetch: can't beat best arrival time"
+                    );
+                    continue;
+                }
+
+                // Get departures for this state's fetch key
+                let departures = match departures_by_key.get(&fetch_key) {
+                    Some(Ok(deps)) => deps,
+                    Some(Err(e)) => return Err(e.clone()),
+                    None => continue, // Should not happen
+                };
+
+                debug!(
+                    station = %state.station.as_str(),
+                    departures = departures.len(),
+                    "Got departures"
+                );
+
+                // Explore each departure
+                for service in departures {
+                    // Skip if we've already used this service
+                    if state.used_services.contains(&service.service_ref.darwin_id) {
+                        continue;
+                    }
+
+                    // Find where we can board this service
+                    let board_idx = match service.find_call(&state.station, CallIndex(0)) {
+                        Some((idx, call)) => {
+                            // Check departure time is after our arrival + min connection
+                            if let Some(dep) = call.expected_departure() {
+                                if dep >= min_departure {
+                                    idx
+                                } else {
+                                    continue;
+                                }
                             } else {
                                 continue;
                             }
-                        } else {
-                            continue;
                         }
-                    }
-                    None => continue,
-                };
+                        None => continue,
+                    };
 
-                trace!(
-                    service_id = %service.service_ref.darwin_id,
-                    terminus = %service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
-                    "Exploring service"
-                );
+                    trace!(
+                        service_id = %service.service_ref.darwin_id,
+                        terminus = %service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
+                        "Exploring service"
+                    );
 
-                // Explore alighting at each subsequent stop
-                self.explore_service(
-                    &state,
-                    &service,
-                    board_idx,
-                    &request.destination,
-                    &mut queue,
-                );
+                    // Explore alighting at each subsequent stop
+                    self.explore_service(
+                        &state,
+                        service,
+                        board_idx,
+                        &request.destination,
+                        &mut queue,
+                    );
+                }
+
+                // Explore walking connections
+                self.explore_walks(&state, &request.destination, &mut queue);
             }
 
-            // Explore walking connections
-            self.explore_walks(&state, &request.destination, &mut queue);
+            if hit_route_limit {
+                break;
+            }
         }
 
         // Rank and filter results
