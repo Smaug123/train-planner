@@ -342,6 +342,9 @@ pub struct TrainMatchView {
     pub scheduled_terminus_arrival: String,
     /// Expected arrival time at terminus (if different from scheduled)
     pub expected_terminus_arrival: Option<String>,
+    /// Index of the board station (next_station) in the calling points list.
+    /// This is the user's implicit position when identifying by next_station.
+    pub board_station_idx: usize,
 }
 
 impl TrainMatchView {

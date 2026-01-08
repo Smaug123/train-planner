@@ -32,7 +32,7 @@
 {% for m in matches %}
 {% if m.is_exact %}
 <div class="info-banner success">
-    <p>Found your train! Select your current position to plan onward connections.</p>
+    <p>Found your train! Confirm to plan onward connections.</p>
 </div>
 {% endif %}
 {% endfor %}
@@ -99,6 +99,18 @@
             </a>
         </div>
 
+        {% if !m.service.is_cancelled %}
+        <div class="confirm-train-row">
+            <button type="button"
+                    class="btn btn-primary select-position-btn"
+                    data-service-id="{{ m.service.service_id }}"
+                    data-position-idx="{{ m.board_station_idx }}"
+                    data-board-station="{{ next_station }}">
+                Yes, I'm on this train
+            </button>
+        </div>
+        {% endif %}
+
         <div class="calling-points">
             <button type="button" class="calling-points-toggle">
                 <span class="arrow">&#9654;</span>
@@ -118,20 +130,11 @@
                         {{ call.name }}
                         <span class="calling-point-crs">({{ call.crs }})</span>
                     </div>
-                    <div class="calling-point-actions">
-                        {% if let Some(platform) = call.platform %}
-                        <span class="calling-point-platform">Plat. {{ platform }}</span>
-                        {% endif %}
-                        {% if !call.is_cancelled && call.has_subsequent_stops %}
-                        <button type="button"
-                                class="btn btn-secondary select-position-btn"
-                                data-service-id="{{ m.service.service_id }}"
-                                data-position-idx="{{ call.index }}"
-                                data-board-station="{{ next_station }}">
-                            I'm here
-                        </button>
-                        {% endif %}
+                    {% if let Some(platform) = call.platform %}
+                    <div class="calling-point-platform">
+                        <span>Plat. {{ platform }}</span>
                     </div>
+                    {% endif %}
                 </div>
                 {% endfor %}
             </div>

@@ -358,6 +358,7 @@ async fn identify_train(
                     terminus_name,
                     scheduled_terminus_arrival,
                     expected_terminus_arrival,
+                    board_station_idx: m.service.service.board_station_idx.0,
                 }
             })
             .collect();
