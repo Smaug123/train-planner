@@ -1014,6 +1014,54 @@ mod tests {
         assert!(result.journeys.is_empty());
     }
 
+    /// Regression test for bug where connections departing significantly after arrival
+    /// were missed. This happened when the ServiceProvider used a fixed time_offset=0
+    /// for Darwin queries, causing it to return trains from "now" rather than from
+    /// when the user would actually arrive at the connection station.
+    ///
+    /// Scenario: User arrives at MAN at 08:59, connection train departs at 10:00.
+    /// With proper time_offset calculation, this connection should be found.
+    #[tokio::test]
+    async fn finds_connection_departing_well_after_arrival() {
+        // Current train: CRE -> SPT -> MAN (arriving 08:59)
+        let current = make_service(
+            "S1",
+            "CRE",
+            &[
+                ("CRE", "Crewe", "", "08:27"),
+                ("SPT", "Stockport", "08:50", "08:51"),
+                ("MAN", "Manchester Piccadilly", "08:59", ""),
+            ],
+        );
+
+        // Connection from MAN at 10:00 to YRK (61 minutes after arrival)
+        let connection = make_service(
+            "S2",
+            "MAN",
+            &[
+                ("MAN", "Manchester Piccadilly", "", "10:00"),
+                ("YRK", "York", "11:15", ""),
+            ],
+        );
+
+        let provider = MockProvider::new(vec![connection]);
+        let walkable = WalkableConnections::new();
+        let config = SearchConfig::default();
+
+        let planner = Planner::new(&provider, &walkable, &config);
+
+        let request = SearchRequest::new(current, CallIndex(0), crs("YRK"));
+        let result = planner.search(&request).await.unwrap();
+
+        assert!(
+            !result.journeys.is_empty(),
+            "Should find journey via Manchester even when connection is 61 mins after arrival"
+        );
+        let journey = &result.journeys[0];
+        assert_eq!(journey.change_count(), 1);
+        assert_eq!(journey.arrival_time(), time("11:15"));
+    }
+
     #[tokio::test]
     async fn intermediate_stops_with_only_departure_times() {
         // Simulates Elizabeth Line / Darwin behavior where intermediate calling points
