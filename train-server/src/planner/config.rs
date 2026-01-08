@@ -25,6 +25,10 @@ pub struct SearchConfig {
     /// Maximum total journey time (minutes).
     /// Journeys longer than this are pruned during search.
     pub max_journey_mins: i64,
+
+    /// Maximum number of states to batch for parallel departure fetching.
+    /// Higher values increase parallelism but may do redundant work.
+    pub batch_size: usize,
 }
 
 impl SearchConfig {
@@ -36,6 +40,7 @@ impl SearchConfig {
         min_connection_mins: i64,
         max_walk_mins: i64,
         max_journey_mins: i64,
+        batch_size: usize,
     ) -> Self {
         Self {
             max_changes,
@@ -44,6 +49,7 @@ impl SearchConfig {
             min_connection_mins,
             max_walk_mins,
             max_journey_mins,
+            batch_size,
         }
     }
 
@@ -77,6 +83,7 @@ impl Default for SearchConfig {
             min_connection_mins: 5,
             max_walk_mins: 15,
             max_journey_mins: 360, // 6 hours
+            batch_size: 8,
         }
     }
 }
@@ -95,6 +102,7 @@ mod tests {
         assert_eq!(config.min_connection_mins, 5);
         assert_eq!(config.max_walk_mins, 15);
         assert_eq!(config.max_journey_mins, 360);
+        assert_eq!(config.batch_size, 8);
     }
 
     #[test]
@@ -109,7 +117,7 @@ mod tests {
 
     #[test]
     fn custom_config() {
-        let config = SearchConfig::new(2, 5, 60, 3, 10, 180);
+        let config = SearchConfig::new(2, 5, 60, 3, 10, 180, 16);
 
         assert_eq!(config.max_changes, 2);
         assert_eq!(config.max_results, 5);
@@ -117,5 +125,6 @@ mod tests {
         assert_eq!(config.min_connection_mins, 3);
         assert_eq!(config.max_walk_mins, 10);
         assert_eq!(config.max_journey_mins, 180);
+        assert_eq!(config.batch_size, 16);
     }
 }
