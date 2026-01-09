@@ -492,12 +492,18 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         }
 
         // Deduplicate by station (keep the one with earliest arrival at query station)
-        // Sort by station (as string), then by alight index, then by walk time
+        // Sort by station (as string), then by arrival time at query station
         stations_to_query.sort_by(|(idx_a, s_a, w_a), (idx_b, s_b, w_b)| {
+            let arrival_at_query = |idx: usize, walk: &Duration| {
+                train.calls[idx]
+                    .expected_arrival()
+                    .or_else(|| train.calls[idx].expected_departure())
+                    .map(|t| t + *walk)
+            };
+
             s_a.as_str()
                 .cmp(s_b.as_str())
-                .then(idx_a.cmp(idx_b))
-                .then(w_a.cmp(w_b))
+                .then(arrival_at_query(*idx_a, w_a).cmp(&arrival_at_query(*idx_b, w_b)))
         });
         stations_to_query.dedup_by(|a, b| a.1 == b.1);
 
@@ -1950,6 +1956,90 @@ mod tests {
             "Should find journey with max_changes=3"
         );
         assert_eq!(result.journeys[0].change_count(), 3);
+    }
+
+    /// Regression test: stations_to_query dedup should keep the entry with
+    /// earliest arrival at the query station, not the earliest call index.
+    ///
+    /// Scenario: A later stop with a much shorter walk can arrive earlier
+    /// at the query station and catch a bridge service that would be missed
+    /// if we only tried the earlier stop.
+    #[tokio::test]
+    async fn two_change_dedup_prefers_earliest_arrival_at_query_station() {
+        // Current train: PAD -> STA (10:00) -> STB (10:10)
+        // STA has 14-min walk to QRY, STB has 1-min walk to QRY
+        //
+        // Path via STA: 10:00 + 14min walk = arrive QRY 10:14
+        //               available 10:19 (with 5min min_connection) -> MISSES bridge at 10:17
+        // Path via STB: 10:10 + 1min walk = arrive QRY 10:11
+        //               available 10:16 -> CATCHES bridge at 10:17
+        let current_train = make_service(
+            "CT",
+            &[
+                ("PAD", "Paddington", "", "09:30"),
+                ("STA", "Station A", "10:00", "10:02"),
+                ("STB", "Station B", "10:10", ""),
+            ],
+        );
+
+        // Bridge service from QRY to RDG (feeder station)
+        let bridge_service = make_service(
+            "BR",
+            &[
+                ("QRY", "Query Station", "", "10:17"),
+                ("RDG", "Reading", "10:40", ""),
+            ],
+        );
+
+        // Arriving service from RDG to destination BRI
+        let arriving_service = make_service(
+            "AR",
+            &[
+                ("RDG", "Reading", "", "10:50"),
+                ("BRI", "Bristol", "11:20", ""),
+            ],
+        );
+
+        let mut provider = MockProvider::new();
+        provider.add_arrivals(crs("BRI"), vec![arriving_service]);
+        provider.add_departures(crs("QRY"), vec![bridge_service]);
+
+        // Set up walkable connections: both STA and STB can walk to QRY
+        // but with very different walk times
+        let mut walkable = WalkableConnections::new();
+        walkable.add(crs("STA"), crs("QRY"), 14); // 14 min walk
+        walkable.add(crs("STB"), crs("QRY"), 1); // 1 min walk
+
+        let config = SearchConfig::default(); // 5 min min_connection
+
+        let request = SearchRequest::new(current_train, CallIndex(0), crs("BRI"));
+
+        let planner = Planner::new(&provider, &walkable, &config);
+        let result = planner.search(&request).await.unwrap();
+
+        // Should find 2-change journey: PAD -> STB, walk to QRY, QRY -> RDG, RDG -> BRI
+        // If the bug exists (dedup by call index), it would try path via STA,
+        // miss the bridge, and find no journey.
+        assert!(
+            !result.journeys.is_empty(),
+            "Should find journey via STB (shorter walk, earlier arrival at QRY)"
+        );
+
+        // Verify it's a 2-change journey through QRY
+        let journey = &result.journeys[0];
+        assert_eq!(
+            journey.change_count(),
+            2,
+            "Expected 2-change journey through QRY"
+        );
+
+        // Verify the walk is from STB, not STA
+        let walk = journey.walks().next().expect("Should have a walk segment");
+        assert_eq!(
+            walk.from, crs("STB"),
+            "Walk should be from STB (shorter walk time)"
+        );
+        assert_eq!(walk.to, crs("QRY"));
     }
 }
 
