@@ -10,6 +10,7 @@
 //! API call. Journeys are then found via set intersection.
 
 mod arrivals_index;
+mod bfs;
 mod config;
 mod rank;
 mod search;
