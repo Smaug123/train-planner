@@ -100,14 +100,15 @@
         </div>
 
         {% if !m.service.is_cancelled %}
-        <div class="confirm-train-row">
-            <button type="button"
-                    class="btn btn-primary select-position-btn"
-                    data-service-id="{{ m.service.service_id }}"
-                    data-position-idx="{{ m.board_station_idx }}"
-                    data-board-station="{{ next_station }}">
-                Yes, I'm on this train
-            </button>
+        <div class="train-selection-row">
+            <label class="train-selection-label">
+                <input type="radio" name="selected-train"
+                       value="{{ m.service.service_id }}"
+                       data-position-idx="{{ m.board_station_idx }}"
+                       data-board-station="{{ next_station }}">
+                <span class="train-selection-indicator"></span>
+                <span class="train-selection-text">Select this train</span>
+            </label>
         </div>
         {% endif %}
 
