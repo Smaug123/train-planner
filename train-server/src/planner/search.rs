@@ -848,7 +848,7 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                     segments: vec![Segment::Train(leg.clone()), Segment::Walk(walk)],
                     station: walkable,
                     available_time: arrival_time + walk_time + min_connection,
-                    changes_so_far: 1, // Walk counts toward next change
+                    changes_so_far: 0, // Walks don't count as changes, only train legs do
                 });
             }
         }
@@ -2113,11 +2113,10 @@ mod proptests {
         for (idx, call) in train.calls.iter().enumerate().skip(pos) {
             if call.station == request.destination && !call.is_cancelled {
                 let leg = Leg::new(train.clone(), request.current_position, CallIndex(idx)).ok();
-                if let Some(leg) = leg {
-                    if let Ok(j) = Journey::new(vec![Segment::Train(leg)]) {
+                if let Some(leg) = leg
+                    && let Ok(j) = Journey::new(vec![Segment::Train(leg)]) {
                         journeys.push(j);
                     }
-                }
             }
         }
 
