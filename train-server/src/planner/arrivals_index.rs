@@ -137,6 +137,17 @@ impl ArrivalsIndex {
     pub fn total_feeder_count(&self) -> usize {
         self.feeders.values().map(|v| v.len()).sum()
     }
+
+    /// Get the earliest arrival time at destination across all indexed services.
+    ///
+    /// Returns `None` if no services are indexed.
+    pub fn earliest_arrival(&self) -> Option<RailTime> {
+        self.feeders
+            .values()
+            .flatten()
+            .map(|f| f.dest_arrival)
+            .min()
+    }
 }
 
 #[cfg(test)]
