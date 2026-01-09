@@ -10,9 +10,6 @@
 <div class="empty-state">
     <h3>No Journeys Found</h3>
     <p>No onward connections found to your destination. You may need to wait for later services or consider alternative routes.</p>
-    <button type="button" class="btn btn-secondary" onclick="window.location.reload()">
-        Start New Search
-    </button>
 </div>
 {% else %}
 <div class="journey-list">
@@ -105,9 +102,4 @@
     {% endfor %}
 </div>
 
-<div style="text-align: center; margin-top: 2rem;">
-    <button type="button" class="btn btn-secondary" onclick="window.location.reload()">
-        Plan Another Journey
-    </button>
-</div>
 {% endif %}
