@@ -219,22 +219,23 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
         // earliest arrival in the index is a lower bound for all such journeys.
         if journeys.len() >= self.config.max_results
             && let Some(earliest) = index.earliest_arrival()
-                && journeys.iter().any(|j| j.arrival_time() == earliest) {
-                    debug!(
-                        "Early exit: have {} journeys with one achieving earliest possible arrival",
-                        journeys.len()
-                    );
-                    let journeys = remove_dominated(journeys);
-                    let journeys = deduplicate(journeys);
-                    let journeys = rank_journeys(journeys);
-                    let journeys: Vec<Journey> =
-                        journeys.into_iter().take(self.config.max_results).collect();
+            && journeys.iter().any(|j| j.arrival_time() == earliest)
+        {
+            debug!(
+                "Early exit: have {} journeys with one achieving earliest possible arrival",
+                journeys.len()
+            );
+            let journeys = remove_dominated(journeys);
+            let journeys = deduplicate(journeys);
+            let journeys = rank_journeys(journeys);
+            let journeys: Vec<Journey> =
+                journeys.into_iter().take(self.config.max_results).collect();
 
-                    return Ok(SearchResult {
-                        journeys,
-                        routes_explored: api_calls,
-                    });
-                }
+            return Ok(SearchResult {
+                journeys,
+                routes_explored: api_calls,
+            });
+        }
 
         // Phase 4: Find 2-change journeys (limited API calls)
         if self.config.max_changes >= 2 {
