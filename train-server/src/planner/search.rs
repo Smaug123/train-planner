@@ -516,7 +516,11 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
             "Fetching departures for 2-change search"
         );
 
-        // Batch fetch departures in parallel
+        // Batch fetch departures in parallel.
+        // We use start_time (current position) for all stations rather than per-station
+        // arrival times. This is correct because Darwin's time window has a fixed end point
+        // (now + 120 min max); using an earlier start fetches a superset of departures.
+        // The filtering at line ~569 discards departures we can't actually catch.
         let api_calls = self
             .batch_fetch_departures(&uncached_stations, start_time, departures_cache)
             .await;
@@ -926,7 +930,8 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
                 valid_states.push(state);
             }
 
-            // Batch fetch departures for all non-cached stations in parallel
+            // Batch fetch departures for all non-cached stations in parallel.
+            // Uses start_time for all stations; see comment in find_two_change for rationale.
             let stations_vec: Vec<Crs> = stations_to_fetch.into_iter().collect();
             let batch_calls = self
                 .batch_fetch_departures(&stations_vec, start_time, departures_cache)
@@ -2371,12 +2376,12 @@ mod proptests {
 
     // ========== Property tests ==========
 
-    /// Key property: arrivals-first search should not miss any journey
-    /// that naive BFS would find (within the same constraints).
+    /// For every arrival time found by naive BFS, arrivals-first should
+    /// find a journey arriving at the same time or earlier.
     ///
-    /// More precisely: for every arrival time found by naive BFS,
-    /// arrivals-first should find a journey arriving at the same time or earlier.
-    fn arrivals_first_finds_all_naive_arrivals(
+    /// Note: this is weaker than "finds all journeys"—a single early
+    /// journey can satisfy multiple naive arrival times.
+    fn arrivals_first_dominates_naive_arrival_times(
         services: Vec<Arc<Service>>,
         request: SearchRequest,
     ) -> Result<(), TestCaseError> {
@@ -2462,7 +2467,7 @@ mod proptests {
 
         #[test]
         fn arrivals_first_complete((services, request, _dest) in scenario_strategy()) {
-            arrivals_first_finds_all_naive_arrivals(services, request)?;
+            arrivals_first_dominates_naive_arrival_times(services, request)?;
         }
     }
 
