@@ -150,7 +150,7 @@ impl CachedDarwinClient {
         // Fetch from API
         let services = self
             .client
-            .get_departures_with_details(crs, 15, time_offset, time_window, date)
+            .get_departures_with_details(crs, 150, time_offset, time_window, date)
             .await?;
 
         // Wrap in Arc for sharing
@@ -185,7 +185,7 @@ impl CachedDarwinClient {
         // Fetch from API
         let services = self
             .client
-            .get_arrivals_with_details(crs, 15, time_offset, time_window, date)
+            .get_arrivals_with_details(crs, 150, time_offset, time_window, date)
             .await?;
 
         // Wrap in Arc for sharing

@@ -148,8 +148,9 @@ pub async fn find_bfs_journeys<P: ServiceProvider>(
             }
             visited_states.insert(state_key);
 
-            // If this station is a feeder, complete journey via ArrivalsIndex
+            // If this station is a feeder, try to complete journey via ArrivalsIndex
             if index.is_feeder(&state.station) {
+                let mut found_connection = false;
                 for feeder in index.feeders_at(&state.station) {
                     let time_until_feeder = feeder
                         .board_time
@@ -188,10 +189,14 @@ pub async fn find_bfs_journeys<P: ServiceProvider>(
 
                     if let Ok(journey) = Journey::new(segments) {
                         journeys.push(journey);
+                        found_connection = true;
                     }
                 }
-                // Don't explore further from feeders
-                continue;
+                // Only skip further exploration if we found a valid connection
+                if found_connection {
+                    continue;
+                }
+                // Otherwise fall through to continue BFS exploration
             }
 
             // Need to fetch departures for this station (if not cached)
