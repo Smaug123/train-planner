@@ -585,6 +585,58 @@ impl crate::planner::ServiceProvider for CachedServiceProvider {
 
         Ok(filtered)
     }
+
+    async fn get_arrivals(
+        &self,
+        station: &Crs,
+        after: crate::domain::RailTime,
+    ) -> Result<Vec<Arc<Service>>, SearchError> {
+        // Calculate time_offset based on 'after' time so Darwin returns relevant arrivals.
+        // For arrivals-first search, we want trains arriving at the destination after
+        // the user could possibly reach them.
+        //
+        // Darwin constraints:
+        // - time_offset must be in range [-120, 120]
+        // - time_offset + time_window must not exceed ~120
+        let current_time =
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(self.current_mins as u32 * 60, 0)
+                .unwrap_or_default();
+        let now = crate::domain::RailTime::new(self.date, current_time);
+        let offset_mins = after.signed_duration_since(now).num_minutes();
+
+        // Clamp offset to Darwin's valid range, and adjust window so total doesn't exceed 120
+        let time_offset = offset_mins.clamp(-120, 120) as i16;
+        let time_window = (120 - time_offset.max(0)) as u16;
+
+        // If the requested time is too far in the future, we can't query Darwin for it
+        if time_window == 0 {
+            return Ok(Vec::new());
+        }
+
+        let services = self
+            .darwin
+            .get_arrivals_with_details(
+                station,
+                self.date,
+                self.current_mins,
+                time_offset,
+                time_window,
+            )
+            .await
+            .map_err(|e| SearchError::FetchError {
+                station: *station,
+                message: e.to_string(),
+            })?;
+
+        // Convert to Arc<Service> - arrivals include previousCallingPoints
+        // which is what we need for the arrivals-first algorithm
+        let result: Vec<Arc<Service>> = services
+            .iter()
+            .map(|s| Arc::new(s.service.clone()))
+            .collect();
+
+        Ok(result)
+    }
 }
 
 /// Application error type.

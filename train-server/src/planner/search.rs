@@ -1,43 +1,70 @@
-//! BFS journey search algorithm.
+//! Arrivals-first journey search algorithm.
 //!
-//! Finds possible routes from a position on a train to a destination,
-//! exploring connections via train changes and walking.
+//! Instead of forward-searching from the current position (BFS), this algorithm:
+//! 1. Fetches the destination's arrivals board (1 API call)
+//! 2. Builds an index of "feeder" trains and their calling points
+//! 3. Finds direct journeys by checking if current train reaches destination
+//! 4. Finds 1-change journeys via set intersection (0 API calls)
+//! 5. Finds 2-change journeys by querying departures from non-feeder stations
+//!
+//! This reduces API calls from ~2000 to ~1-10 for typical journeys.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use chrono::Duration;
 use futures::future::join_all;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace};
 
+use super::arrivals_index::ArrivalsIndex;
+use super::bfs::{BfsParams, find_bfs_journeys};
+use super::config::SearchConfig;
+use super::rank::{deduplicate, rank_journeys, remove_dominated};
 use crate::domain::{CallIndex, Crs, Journey, Leg, RailTime, Segment, Service, Walk};
 use crate::walkable::WalkableConnections;
 
-use super::config::SearchConfig;
-use super::rank::{deduplicate, rank_journeys, remove_dominated};
+/// Provider of train service information.
+///
+/// Abstracts the data source (real API vs mock) for testing.
+pub trait ServiceProvider: Send + Sync {
+    /// Get departures from a station after a given time.
+    fn get_departures(
+        &self,
+        station: &Crs,
+        after: RailTime,
+    ) -> impl std::future::Future<Output = Result<Vec<Arc<Service>>, SearchError>> + Send;
 
-/// Error from journey search.
+    /// Get arrivals at a station (for destination-first search).
+    fn get_arrivals(
+        &self,
+        station: &Crs,
+        after: RailTime,
+    ) -> impl std::future::Future<Output = Result<Vec<Arc<Service>>, SearchError>> + Send;
+}
+
+/// Error type for search operations.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SearchError {
-    /// Failed to fetch departures
-    #[error("failed to fetch departures from {station}: {message}")]
-    FetchError { station: Crs, message: String },
-
-    /// Invalid search request
+    /// Invalid search request.
     #[error("invalid search request: {0}")]
     InvalidRequest(String),
 
-    /// Search timed out
+    /// Failed to fetch service data.
+    #[error("failed to fetch services at {station}: {message}")]
+    FetchError { station: Crs, message: String },
+
+    /// Search timed out.
     #[error("search timed out")]
     Timeout,
 }
 
-/// Request for journey search.
+/// A request to search for journeys.
 #[derive(Debug, Clone)]
 pub struct SearchRequest {
-    /// The train service the user is currently on.
+    /// The train the user is currently on.
     pub current_service: Arc<Service>,
 
-    /// The user's current position on the train (call index).
+    /// The user's current position (call index) on the train.
     pub current_position: CallIndex,
 
     /// The destination station.
@@ -62,29 +89,35 @@ impl SearchRequest {
     pub fn validate(&self) -> Result<(), SearchError> {
         // Check position is valid
         if self.current_position.0 >= self.current_service.calls.len() {
-            return Err(SearchError::InvalidRequest(
-                "current position is out of bounds".to_string(),
-            ));
-        }
-
-        // Check there are subsequent stops
-        if self.current_position.0 >= self.current_service.calls.len() - 1 {
-            return Err(SearchError::InvalidRequest(
-                "no subsequent stops on current train".to_string(),
-            ));
+            return Err(SearchError::InvalidRequest(format!(
+                "Position {} is out of bounds for train with {} calls",
+                self.current_position.0,
+                self.current_service.calls.len()
+            )));
         }
 
         Ok(())
     }
+
+    /// Get the current station.
+    pub fn current_station(&self) -> &Crs {
+        &self.current_service.calls[self.current_position.0].station
+    }
+
+    /// Get the current time (expected departure from current position).
+    pub fn current_time(&self) -> Option<RailTime> {
+        let call = &self.current_service.calls[self.current_position.0];
+        call.expected_departure().or(call.expected_arrival())
+    }
 }
 
-/// Result of journey search.
+/// Result of a journey search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Found journeys, ranked best-first.
+    /// Found journeys, ranked by preference.
     pub journeys: Vec<Journey>,
 
-    /// Number of routes explored during search.
+    /// Number of API calls made during search.
     pub routes_explored: usize,
 }
 
@@ -98,110 +131,7 @@ impl SearchResult {
     }
 }
 
-/// Trait for providing departure services.
-///
-/// This abstraction allows the planner to be tested with mock data.
-pub trait ServiceProvider: Send + Sync {
-    /// Get departures from a station after a given time.
-    ///
-    /// Returns services that depart from `station` after `after` within
-    /// the time window.
-    fn get_departures(
-        &self,
-        station: &Crs,
-        after: RailTime,
-    ) -> impl std::future::Future<Output = Result<Vec<Arc<Service>>, SearchError>> + Send;
-}
-
-/// BFS state during search.
-#[derive(Debug, Clone)]
-struct SearchState {
-    /// Current station.
-    station: Crs,
-
-    /// Current time (arrival time at this station).
-    time: RailTime,
-
-    /// Journey segments built so far.
-    segments: Vec<Segment>,
-
-    /// Number of train changes made.
-    changes: usize,
-
-    /// Services already used (to avoid cycles).
-    used_services: HashSet<String>,
-}
-
-/// Key for deduplicating departure fetches.
-/// States at the same station in the same time bucket can share a fetch.
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct FetchKey {
-    station: Crs,
-    /// 10-minute bucket, aligned with cache bucketing.
-    time_bucket: i64,
-}
-
-/// A search state pending departure fetch, along with its fetch key.
-struct PendingState {
-    state: SearchState,
-    fetch_key: FetchKey,
-    min_departure: RailTime,
-}
-
-impl SearchState {
-    /// Create initial states from alighting at subsequent stops on current train.
-    fn initial_states(request: &SearchRequest) -> Vec<Self> {
-        let service = &request.current_service;
-        let mut states = Vec::new();
-
-        // Create a state for alighting at each subsequent stop
-        for idx in (request.current_position.0 + 1)..service.calls.len() {
-            let call = &service.calls[idx];
-
-            // Need arrival time at this stop. Darwin only provides departure times for
-            // intermediate calling points (arrival is typically 1-2 mins earlier but
-            // not exposed), so fall back to departure time if arrival isn't available.
-            let arrival_time = match call
-                .expected_arrival()
-                .or_else(|| call.expected_departure())
-            {
-                Some(t) => t,
-                None => continue, // Skip stops without any time
-            };
-
-            // Create the leg from current position to this stop
-            let leg = match Leg::new(service.clone(), request.current_position, CallIndex(idx)) {
-                Ok(leg) => leg,
-                Err(_) => continue, // Skip if leg construction fails
-            };
-
-            let mut used = HashSet::new();
-            used.insert(service.service_ref.darwin_id.clone());
-
-            states.push(SearchState {
-                station: call.station,
-                time: arrival_time,
-                segments: vec![Segment::Train(leg)],
-                changes: 0,
-                used_services: used,
-            });
-        }
-
-        states
-    }
-
-    /// Check if we've reached the destination.
-    fn at_destination(&self, destination: &Crs) -> bool {
-        &self.station == destination
-    }
-
-    /// Build a journey from the current state.
-    fn to_journey(&self) -> Option<Journey> {
-        Journey::new(self.segments.clone()).ok()
-    }
-}
-
-/// Journey planner using BFS.
+/// Journey planner using arrivals-first search.
 pub struct Planner<'a, P: ServiceProvider> {
     provider: &'a P,
     walkable: &'a WalkableConnections,
@@ -231,482 +161,713 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResult, SearchError> {
         info!(
             terminus = %request.current_service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
-            "Starting journey search"
+            "Starting arrivals-first journey search"
         );
         request.validate()?;
 
-        // Check if destination is directly reachable on current train
         let mut journeys = Vec::new();
-        let mut routes_explored = 0;
+        let mut api_calls = 0;
+        let mut departures_cache: HashMap<Crs, Vec<Arc<Service>>> = HashMap::new();
 
-        // Track best arrival time for pruning: skip states that can't beat our best
-        let mut best_arrival: Option<RailTime> = None;
-
-        // Check direct service to destination
-        if let Some(journey) = self.check_direct(request) {
+        // Phase 1: Check direct journey (current train goes to destination)
+        if let Some(j) = self.find_direct(request) {
             debug!("Direct route found on current train");
-            best_arrival = Some(journey.arrival_time());
-            journeys.push(journey);
-        } else {
-            debug!("No direct route on current train");
+            journeys.push(j);
         }
 
-        // Initialize BFS with states from alighting at each subsequent stop
-        let initial_states = SearchState::initial_states(request);
-        debug!(initial_states = initial_states.len(), "Starting BFS");
-        for state in &initial_states {
-            trace!(
-                station = %state.station.as_str(),
-                time = %state.time,
-                "Initial alighting point"
-            );
-        }
-        let mut queue: VecDeque<SearchState> = initial_states.into();
-
-        // Track visited (station, time bucket) to avoid redundant exploration
-        let mut visited: HashSet<(Crs, i64)> = HashSet::new();
-
-        // Batched parallel fetch: collect states, fetch departures in parallel, process results
-        while !queue.is_empty() {
-            // Phase 1: Collect batch of states that need departure fetches
-            let mut batch: Vec<PendingState> = Vec::with_capacity(self.config.batch_size);
-            // Track earliest min_departure per fetch key for deduplication
-            let mut fetch_requests: HashMap<FetchKey, RailTime> = HashMap::new();
-            let mut hit_route_limit = false;
-
-            while let Some(state) = queue.pop_front() {
-                routes_explored += 1;
-
-                // Pruning: skip if we can't possibly beat the best arrival time
-                if best_arrival.is_some_and(|best| state.time >= best) {
-                    trace!(
-                        station = %state.station.as_str(),
-                        time = %state.time,
-                        "Pruned: can't beat best arrival time"
-                    );
-                    continue;
-                }
-
-                // Check if at destination
-                if state.at_destination(&request.destination) {
-                    if let Some(journey) = state.to_journey() {
-                        let arrival = journey.arrival_time();
-                        debug!(
-                            changes = journey.change_count(),
-                            arrival = %arrival,
-                            "Found journey to destination"
-                        );
-                        if best_arrival.is_none_or(|best| arrival < best) {
-                            best_arrival = Some(arrival);
-                        }
-                        journeys.push(journey);
-                    }
-                    continue;
-                }
-
-                // Pruning: check max changes
-                if state.changes >= self.config.max_changes {
-                    trace!(
-                        station = %state.station.as_str(),
-                        changes = state.changes,
-                        "Pruned: max changes exceeded"
-                    );
-                    continue;
-                }
-
-                // Pruning: check journey time
-                let journey_so_far = state.time.signed_duration_since(
-                    state
-                        .segments
-                        .first()
-                        .map(|s| match s {
-                            Segment::Train(leg) => leg.departure_time(),
-                            Segment::Walk(_) => state.time,
-                        })
-                        .unwrap_or(state.time),
-                );
-                if journey_so_far > self.config.max_journey() {
-                    trace!(
-                        station = %state.station.as_str(),
-                        duration = ?journey_so_far,
-                        "Pruned: max journey time exceeded"
-                    );
-                    continue;
-                }
-
-                // Deduplicate by (station, time bucket)
-                let time_bucket = state.time.to_datetime().and_utc().timestamp() / 300; // 5-min buckets
-                if !visited.insert((state.station, time_bucket)) {
-                    trace!(
-                        station = %state.station.as_str(),
-                        "Pruned: already visited this station/time"
-                    );
-                    continue;
-                }
-
-                // Limit total exploration
-                if routes_explored > 10000 {
-                    warn!("Search terminated: exceeded 10000 routes explored");
-                    hit_route_limit = true;
-                    break;
-                }
-
-                // This state needs a fetch - add to batch
-                let min_departure = state.time + self.config.min_connection();
-                // Use 10-minute buckets for fetch deduplication, aligned with cache bucketing
-                let cache_bucket = min_departure.to_datetime().and_utc().timestamp() / 600;
-                let fetch_key = FetchKey {
-                    station: state.station,
-                    time_bucket: cache_bucket,
-                };
-
-                debug!(
-                    station = %state.station.as_str(),
-                    time = %state.time,
-                    min_departure = %min_departure,
-                    changes = state.changes,
-                    "Exploring station"
-                );
-
-                // Track earliest min_departure for this fetch key
-                fetch_requests
-                    .entry(fetch_key.clone())
-                    .and_modify(|existing| {
-                        if min_departure < *existing {
-                            *existing = min_departure;
-                        }
-                    })
-                    .or_insert(min_departure);
-
-                batch.push(PendingState {
-                    state,
-                    fetch_key,
-                    min_departure,
-                });
-
-                if batch.len() >= self.config.batch_size {
-                    break;
-                }
-            }
-
-            if batch.is_empty() {
-                break;
-            }
-
-            // Phase 2: Fetch departures in parallel (deduplicated by fetch key)
-            let fetch_futures: Vec<_> = fetch_requests
-                .iter()
-                .map(|(key, &min_dep)| {
-                    let station = key.station;
-                    let provider = self.provider;
-                    async move {
-                        let result = provider.get_departures(&station, min_dep).await;
-                        (station, key.time_bucket, result)
-                    }
-                })
-                .collect();
-
-            let fetch_results: Vec<_> = join_all(fetch_futures).await;
-
-            // Build lookup map from fetch results
-            let departures_by_key: HashMap<FetchKey, Result<Vec<Arc<Service>>, SearchError>> =
-                fetch_results
-                    .into_iter()
-                    .map(|(station, time_bucket, result)| {
-                        (
-                            FetchKey {
-                                station,
-                                time_bucket,
-                            },
-                            result,
-                        )
-                    })
-                    .collect();
-
-            // Phase 3: Process each state's departures
-            for pending in batch {
-                let PendingState {
-                    state,
-                    fetch_key,
-                    min_departure,
-                } = pending;
-
-                // Re-check best_arrival (may have improved during batch processing)
-                if best_arrival.is_some_and(|best| state.time >= best) {
-                    trace!(
-                        station = %state.station.as_str(),
-                        "Pruned post-fetch: can't beat best arrival time"
-                    );
-                    continue;
-                }
-
-                // Get departures for this state's fetch key
-                let departures = match departures_by_key.get(&fetch_key) {
-                    Some(Ok(deps)) => deps,
-                    Some(Err(e)) => return Err(e.clone()),
-                    None => continue, // Should not happen
-                };
-
-                debug!(
-                    station = %state.station.as_str(),
-                    departures = departures.len(),
-                    "Got departures"
-                );
-
-                // Explore each departure
-                for service in departures {
-                    // Skip if we've already used this service
-                    if state.used_services.contains(&service.service_ref.darwin_id) {
-                        continue;
-                    }
-
-                    // Find where we can board this service
-                    let board_idx = match service.find_call(&state.station, CallIndex(0)) {
-                        Some((idx, call)) => {
-                            // Check departure time is after our arrival + min connection
-                            if let Some(dep) = call.expected_departure() {
-                                if dep >= min_departure {
-                                    idx
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        }
-                        None => continue,
-                    };
-
-                    trace!(
-                        service_id = %service.service_ref.darwin_id,
-                        terminus = %service.calls.last().map(|c| c.station.as_str()).unwrap_or("?"),
-                        "Exploring service"
-                    );
-
-                    // Explore alighting at each subsequent stop
-                    self.explore_service(
-                        &state,
-                        service,
-                        board_idx,
-                        &request.destination,
-                        &mut queue,
-                    );
-                }
-
-                // Explore walking connections
-                self.explore_walks(&state, &request.destination, &mut queue);
-            }
-
-            if hit_route_limit {
-                break;
-            }
+        // Early exit: if direct journey exists and no changes allowed, we're done
+        if !journeys.is_empty() && self.config.max_changes == 0 {
+            return Ok(SearchResult {
+                journeys,
+                routes_explored: api_calls,
+            });
         }
 
-        // Rank and filter results
+        // Phase 2: Fetch arrivals at destination and build index (1 API call)
+        let current_time = request.current_time().ok_or_else(|| {
+            SearchError::InvalidRequest("Cannot determine current time".to_string())
+        })?;
+
+        let arrivals = self
+            .provider
+            .get_arrivals(&request.destination, current_time)
+            .await?;
+        api_calls += 1;
+
         debug!(
-            routes_explored,
-            journeys_found = journeys.len(),
-            "BFS complete"
+            arrivals = arrivals.len(),
+            "Built arrivals index for destination"
         );
+
+        let index = ArrivalsIndex::from_arrivals(request.destination, arrivals);
+        debug!(
+            feeder_stations = index.feeder_station_count(),
+            total_feeders = index.total_feeder_count(),
+            "Arrivals index built"
+        );
+
+        // Phase 3: Find 1-change journeys (0 API calls)
+        if self.config.max_changes >= 1 {
+            let one_change = self.find_one_change(request, &index);
+            debug!(found = one_change.len(), "Found 1-change journeys");
+            journeys.extend(one_change);
+        }
+
+        // Early exit: if we have max_results journeys and one achieves the earliest
+        // possible arrival (per ArrivalsIndex), 2-change/BFS can't improve results.
+        // Any change-based journey must end on an ArrivalsIndex service, so the
+        // earliest arrival in the index is a lower bound for all such journeys.
+        if journeys.len() >= self.config.max_results
+            && let Some(earliest) = index.earliest_arrival()
+            && journeys.iter().any(|j| j.arrival_time() == earliest)
+        {
+            debug!(
+                "Early exit: have {} journeys with one achieving earliest possible arrival",
+                journeys.len()
+            );
+            let journeys = remove_dominated(journeys);
+            let journeys = deduplicate(journeys);
+            let journeys = rank_journeys(journeys);
+            let journeys: Vec<Journey> =
+                journeys.into_iter().take(self.config.max_results).collect();
+
+            return Ok(SearchResult {
+                journeys,
+                routes_explored: api_calls,
+            });
+        }
+
+        // Phase 4: Find 2-change journeys (limited API calls)
+        if self.config.max_changes >= 2 {
+            let (two_change, calls) = self
+                .find_two_change(request, &index, &mut departures_cache)
+                .await?;
+            debug!(
+                found = two_change.len(),
+                api_calls = calls,
+                "Found 2-change journeys"
+            );
+            journeys.extend(two_change);
+            api_calls += calls;
+        }
+
+        // Phase 5: BFS fallback for 3+ change journeys
+        if self.config.max_changes > 2 {
+            let bfs_params = BfsParams {
+                current_service: &request.current_service,
+                current_position: request.current_position,
+                destination: request.destination,
+                start_time: current_time,
+            };
+            let bfs_result = find_bfs_journeys(
+                &bfs_params,
+                &index,
+                &mut departures_cache,
+                self.walkable,
+                self.config,
+                self.provider,
+            )
+            .await;
+            debug!(
+                found = bfs_result.journeys.len(),
+                api_calls = bfs_result.api_calls,
+                "Found BFS fallback journeys"
+            );
+            journeys.extend(bfs_result.journeys);
+            api_calls += bfs_result.api_calls;
+        }
+
+        // Phase 6: Rank, deduplicate, and limit results
         let journeys = remove_dominated(journeys);
         let journeys = deduplicate(journeys);
-        let mut journeys = rank_journeys(journeys);
-        journeys.truncate(self.config.max_results);
+        let journeys = rank_journeys(journeys);
+        let journeys: Vec<Journey> = journeys.into_iter().take(self.config.max_results).collect();
 
         info!(
-            routes_explored,
+            api_calls,
             journeys = journeys.len(),
-            "Search complete"
+            "Arrivals-first search complete"
         );
-
-        if journeys.is_empty() {
-            warn!("No routes found to destination");
-        }
 
         Ok(SearchResult {
             journeys,
-            routes_explored,
+            routes_explored: api_calls,
         })
     }
 
-    /// Check if destination is directly reachable on current train.
-    fn check_direct(&self, request: &SearchRequest) -> Option<Journey> {
-        let service = &request.current_service;
+    /// Find a direct journey (staying on current train to destination).
+    fn find_direct(&self, request: &SearchRequest) -> Option<Journey> {
+        let train = &request.current_service;
+        let pos = request.current_position.0;
 
-        // Look for destination in subsequent calls
-        let dest_idx = service.find_call(&request.destination, request.current_position.next())?;
-
-        // Create the leg
-        let leg = Leg::new(service.clone(), request.current_position, dest_idx.0).ok()?;
-
-        Journey::new(vec![Segment::Train(leg)]).ok()
-    }
-
-    /// Explore alighting options on a service.
-    fn explore_service(
-        &self,
-        state: &SearchState,
-        service: &Arc<Service>,
-        board_idx: CallIndex,
-        destination: &Crs,
-        queue: &mut VecDeque<SearchState>,
-    ) {
-        // Check if this service goes to the destination
-        if let Some((dest_idx, _)) = service.find_call(destination, board_idx.next()) {
-            // Direct to destination - add final journey
-            if let Ok(leg) = Leg::new(service.clone(), board_idx, dest_idx) {
-                let mut segments = state.segments.clone();
-                segments.push(Segment::Train(leg.clone()));
-
-                let mut used = state.used_services.clone();
-                used.insert(service.service_ref.darwin_id.clone());
-
-                queue.push_back(SearchState {
-                    station: *destination,
-                    time: leg.arrival_time(),
-                    segments,
-                    changes: state.changes + 1,
-                    used_services: used,
-                });
+        // Check if any call after current position is the destination
+        // Note: skip(pos + 1) to avoid trying to create a leg from pos to pos
+        for (idx, call) in train.calls.iter().enumerate().skip(pos + 1) {
+            if call.station == request.destination && !call.is_cancelled {
+                // Found direct journey
+                let leg = match Leg::new(train.clone(), request.current_position, CallIndex(idx)) {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                return Journey::new(vec![Segment::Train(leg)]).ok();
             }
         }
 
-        // Also explore intermediate stops (for further connections)
-        for idx in (board_idx.0 + 1)..service.calls.len() {
-            let call = &service.calls[idx];
-
-            // Skip destination (already handled above)
-            if &call.station == destination {
+        // Also check walkable destinations from any stop
+        for (idx, call) in train.calls.iter().enumerate().skip(pos) {
+            if call.is_cancelled {
                 continue;
             }
 
-            // Fall back to departure time if arrival isn't available (see initial_states)
-            let arrival_time = match call
+            // Check if we can walk from this stop to destination
+            if self
+                .walkable
+                .is_walkable(&call.station, &request.destination)
+            {
+                let walk_duration = self.walkable.get(&call.station, &request.destination)?;
+
+                // Only if walk is within limits
+                if walk_duration <= self.config.max_walk() {
+                    let leg =
+                        Leg::new(train.clone(), request.current_position, CallIndex(idx)).ok()?;
+                    let walk = Walk::new(call.station, request.destination, walk_duration);
+                    return Journey::new(vec![Segment::Train(leg), Segment::Walk(walk)]).ok();
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find 1-change journeys using the arrivals index.
+    ///
+    /// For each station on the current train after our position, check if it's
+    /// a feeder station (has services going to destination). If so, check timing
+    /// constraints for valid connections.
+    fn find_one_change(&self, request: &SearchRequest, index: &ArrivalsIndex) -> Vec<Journey> {
+        let mut journeys = Vec::new();
+        let train = &request.current_service;
+        let pos = request.current_position.0;
+        let min_connection = self.config.min_connection();
+        let max_journey = self.config.max_journey();
+        let max_walk = self.config.max_walk();
+        let start_time = match request.current_time() {
+            Some(t) => t,
+            None => return journeys,
+        };
+
+        // For each station on current train after our position
+        for (alight_idx, alight_call) in train.calls.iter().enumerate().skip(pos) {
+            if alight_call.is_cancelled {
+                continue;
+            }
+
+            // Skip destination itself (handled by direct)
+            if alight_call.station == request.destination {
+                continue;
+            }
+
+            let arrival_at_alight = match alight_call
                 .expected_arrival()
-                .or_else(|| call.expected_departure())
+                .or_else(|| alight_call.expected_departure())
             {
                 Some(t) => t,
                 None => continue,
             };
 
-            // Check journey time limit
-            let first_dep = state
-                .segments
-                .first()
-                .map(|s| match s {
-                    Segment::Train(leg) => leg.departure_time(),
-                    Segment::Walk(_) => state.time,
-                })
-                .unwrap_or(state.time);
+            // Check both the station itself and walkable neighbours
+            let stations_to_check: Vec<(Crs, Duration)> =
+                std::iter::once((alight_call.station, Duration::zero()))
+                    .chain(
+                        self.walkable
+                            .walkable_from(&alight_call.station)
+                            .into_iter()
+                            .filter(|(_, d)| *d <= max_walk),
+                    )
+                    .collect();
 
-            if arrival_time.signed_duration_since(first_dep) > self.config.max_journey() {
-                continue;
-            }
+            for (feeder_station, walk_time) in stations_to_check {
+                // Get services at this feeder station going to destination
+                for feeder in index.feeders_at(&feeder_station) {
+                    // Calculate connection time (including walk if needed)
+                    let available_time = arrival_at_alight + walk_time;
+                    let connection_time = feeder.board_time.signed_duration_since(available_time);
 
-            if let Ok(leg) = Leg::new(service.clone(), board_idx, CallIndex(idx)) {
-                let mut segments = state.segments.clone();
-                segments.push(Segment::Train(leg));
+                    // Check timing constraints
+                    if connection_time < min_connection {
+                        trace!(
+                            station = %feeder_station.as_str(),
+                            connection_mins = connection_time.num_minutes(),
+                            "Skipping: connection too tight"
+                        );
+                        continue; // Not enough time to make connection
+                    }
 
-                let mut used = state.used_services.clone();
-                used.insert(service.service_ref.darwin_id.clone());
+                    let total_duration = feeder.dest_arrival.signed_duration_since(start_time);
+                    if total_duration > max_journey {
+                        trace!(
+                            station = %feeder_station.as_str(),
+                            duration_mins = total_duration.num_minutes(),
+                            "Skipping: journey too long"
+                        );
+                        continue; // Journey too long
+                    }
 
-                queue.push_back(SearchState {
-                    station: call.station,
-                    time: arrival_time,
-                    segments,
-                    changes: state.changes + 1,
-                    used_services: used,
-                });
+                    // Build the journey
+                    if let Some(journey) = self.build_one_change_journey(
+                        train,
+                        request.current_position,
+                        CallIndex(alight_idx),
+                        &feeder.service,
+                        feeder.board_index,
+                        &alight_call.station,
+                        &feeder_station,
+                        walk_time,
+                        &request.destination,
+                    ) {
+                        journeys.push(journey);
+                    }
+                }
             }
         }
+
+        journeys
     }
 
-    /// Explore walking to nearby stations.
-    fn explore_walks(
+    /// Build a 1-change journey from the given components.
+    #[allow(clippy::too_many_arguments)]
+    fn build_one_change_journey(
         &self,
-        state: &SearchState,
+        first_train: &Arc<Service>,
+        board_first: CallIndex,
+        alight_first: CallIndex,
+        second_train: &Arc<Service>,
+        board_second: CallIndex,
+        alight_station: &Crs,
+        board_station: &Crs,
+        walk_time: Duration,
         destination: &Crs,
-        queue: &mut VecDeque<SearchState>,
-    ) {
-        for (walk_to, walk_duration) in self.walkable.walkable_from(&state.station) {
-            // Check walk time limit
-            if walk_duration > self.config.max_walk() {
+    ) -> Option<Journey> {
+        let leg1 = Leg::new(first_train.clone(), board_first, alight_first).ok()?;
+
+        // Find where second train arrives at destination
+        // Note: service may continue past destination, so find actual destination call
+        let alight_second_idx = second_train
+            .calls
+            .iter()
+            .position(|c| c.station == *destination)?;
+        let leg2 = Leg::new(
+            second_train.clone(),
+            board_second,
+            CallIndex(alight_second_idx),
+        )
+        .ok()?;
+
+        let mut segments = vec![Segment::Train(leg1)];
+
+        // Add walk if changing between different stations
+        if alight_station != board_station {
+            segments.push(Segment::Walk(Walk::new(
+                *alight_station,
+                *board_station,
+                walk_time,
+            )));
+        }
+
+        segments.push(Segment::Train(leg2));
+
+        Journey::new(segments).ok()
+    }
+
+    /// Find 2-change journeys.
+    ///
+    /// For each station on the current train that is NOT a feeder station,
+    /// fetch departures and check if any of those services call at a feeder station.
+    async fn find_two_change(
+        &self,
+        request: &SearchRequest,
+        index: &ArrivalsIndex,
+        departures_cache: &mut HashMap<Crs, Vec<Arc<Service>>>,
+    ) -> Result<(Vec<Journey>, usize), SearchError> {
+        let mut journeys = Vec::new();
+
+        let train = &request.current_service;
+        let pos = request.current_position.0;
+        let min_connection = self.config.min_connection();
+        let max_journey = self.config.max_journey();
+        let max_walk = self.config.max_walk();
+        let start_time = match request.current_time() {
+            Some(t) => t,
+            None => return Ok((journeys, 0)),
+        };
+
+        // Collect stations to query (all stops on current train, including feeders)
+        // Also include walkable stations from each stop
+        let mut stations_to_query: Vec<(usize, Crs, Duration)> = Vec::new();
+
+        for (alight_idx, alight_call) in train.calls.iter().enumerate().skip(pos) {
+            if alight_call.is_cancelled {
                 continue;
             }
 
-            let arrival_time = state.time + walk_duration;
+            // Skip destination
+            if alight_call.station == request.destination {
+                continue;
+            }
 
-            // Create walk segment
-            let walk = Walk {
-                from: state.station,
-                to: walk_to,
-                duration: walk_duration,
-            };
+            // Include ALL stations (including feeders) for 2-change exploration.
+            // Even if a station is a feeder, we need to explore 2-change paths through it
+            // because the 1-change via that feeder might be rejected (too long, bad timing).
+            stations_to_query.push((alight_idx, alight_call.station, Duration::zero()));
 
-            let mut segments = state.segments.clone();
-            segments.push(Segment::Walk(walk));
-
-            // If walk destination is our destination, we're done
-            if walk_to == *destination {
-                queue.push_back(SearchState {
-                    station: walk_to,
-                    time: arrival_time,
-                    segments,
-                    changes: state.changes, // Walking doesn't count as a change
-                    used_services: state.used_services.clone(),
-                });
-            } else {
-                // Otherwise, explore connections from the walked-to station
-                queue.push_back(SearchState {
-                    station: walk_to,
-                    time: arrival_time,
-                    segments,
-                    changes: state.changes,
-                    used_services: state.used_services.clone(),
-                });
+            // Also check walkable neighbours
+            for (walkable_station, walk_time) in self.walkable.walkable_from(&alight_call.station) {
+                if walk_time <= max_walk {
+                    stations_to_query.push((alight_idx, walkable_station, walk_time));
+                }
             }
         }
+
+        // Deduplicate by station (keep the one with earliest arrival at query station)
+        // Sort by station (as string), then by arrival time at query station
+        stations_to_query.sort_by(|(idx_a, s_a, w_a), (idx_b, s_b, w_b)| {
+            let arrival_at_query = |idx: usize, walk: &Duration| {
+                train.calls[idx]
+                    .expected_arrival()
+                    .or_else(|| train.calls[idx].expected_departure())
+                    .map(|t| t + *walk)
+            };
+
+            s_a.as_str()
+                .cmp(s_b.as_str())
+                .then(arrival_at_query(*idx_a, w_a).cmp(&arrival_at_query(*idx_b, w_b)))
+        });
+        stations_to_query.dedup_by(|a, b| a.1 == b.1);
+
+        // Collect unique stations that need fetching (not in cache)
+        let uncached_stations: Vec<Crs> = stations_to_query
+            .iter()
+            .map(|(_, station, _)| *station)
+            .filter(|s| !departures_cache.contains_key(s))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        debug!(
+            total_stations = stations_to_query.len(),
+            uncached = uncached_stations.len(),
+            "Fetching departures for 2-change search"
+        );
+
+        // Batch fetch departures in parallel.
+        // We use start_time (current position) for all stations rather than per-station
+        // arrival times. This is correct because Darwin's time window has a fixed end point
+        // (now + 120 min max); using an earlier start fetches a superset of departures.
+        // The filtering at line ~569 discards departures we can't actually catch.
+        let api_calls = self
+            .batch_fetch_departures(&uncached_stations, start_time, departures_cache)
+            .await;
+
+        // Now process synchronously using the cache
+        for (alight_idx, query_station, walk_to_query) in stations_to_query {
+            let alight_call = &train.calls[alight_idx];
+
+            let arrival_at_alight = match alight_call
+                .expected_arrival()
+                .or_else(|| alight_call.expected_departure())
+            {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Time when we're available to board at the query station
+            let available_at_query = arrival_at_alight + walk_to_query + min_connection;
+
+            // Get departures from cache
+            let departures = departures_cache
+                .get(&query_station)
+                .cloned()
+                .unwrap_or_default();
+
+            trace!(
+                station = %query_station.as_str(),
+                departures = departures.len(),
+                "Processing departures for 2-change search"
+            );
+
+            // Check each departing service for connections to feeder stations
+            for bridge_service in &departures {
+                // Find where we board this service
+                let bridge_board_idx = match bridge_service
+                    .calls
+                    .iter()
+                    .position(|c| c.station == query_station)
+                {
+                    Some(idx) => idx,
+                    None => continue,
+                };
+
+                // Check if service departs after we're available
+                let bridge_board_call = &bridge_service.calls[bridge_board_idx];
+                let bridge_depart = match bridge_board_call.expected_departure() {
+                    Some(t) => t,
+                    None => continue,
+                };
+                if bridge_depart < available_at_query {
+                    continue;
+                }
+
+                // For each call on the bridge service AFTER where we board
+                for (bridge_alight_idx, bridge_call) in bridge_service
+                    .calls
+                    .iter()
+                    .enumerate()
+                    .skip(bridge_board_idx + 1)
+                {
+                    if bridge_call.is_cancelled {
+                        continue;
+                    }
+
+                    let bridge_arrival = match bridge_call
+                        .expected_arrival()
+                        .or_else(|| bridge_call.expected_departure())
+                    {
+                        Some(t) => t,
+                        None => continue,
+                    };
+
+                    // Check if this call's station (or walkable neighbour) is a feeder
+                    let feeder_candidates: Vec<(Crs, Duration)> =
+                        std::iter::once((bridge_call.station, Duration::zero()))
+                            .chain(
+                                self.walkable
+                                    .walkable_from(&bridge_call.station)
+                                    .into_iter()
+                                    .filter(|(_, d)| *d <= max_walk),
+                            )
+                            .collect();
+
+                    for (feeder_station, walk_to_feeder) in feeder_candidates {
+                        for feeder in index.feeders_at(&feeder_station) {
+                            // Check timing: can we make the connection?
+                            let available_at_feeder = bridge_arrival + walk_to_feeder;
+                            let connection_time =
+                                feeder.board_time.signed_duration_since(available_at_feeder);
+
+                            if connection_time < min_connection {
+                                continue;
+                            }
+
+                            let total_duration =
+                                feeder.dest_arrival.signed_duration_since(start_time);
+                            if total_duration > max_journey {
+                                continue;
+                            }
+
+                            // Build the 2-change journey
+                            if let Some(journey) = self.build_two_change_journey(
+                                train,
+                                request.current_position,
+                                CallIndex(alight_idx),
+                                &alight_call.station,
+                                &query_station,
+                                walk_to_query,
+                                bridge_service,
+                                CallIndex(bridge_board_idx),
+                                CallIndex(bridge_alight_idx),
+                                &bridge_call.station,
+                                &feeder_station,
+                                walk_to_feeder,
+                                &feeder.service,
+                                feeder.board_index,
+                                &request.destination,
+                            ) {
+                                journeys.push(journey);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((journeys, api_calls))
+    }
+
+    /// Batch fetch departures for multiple stations in parallel.
+    ///
+    /// Fetches departures for all given stations, respecting `batch_size` for
+    /// parallelism. Results are inserted into the cache. Returns the number
+    /// of API calls made.
+    async fn batch_fetch_departures(
+        &self,
+        stations: &[Crs],
+        after: RailTime,
+        cache: &mut HashMap<Crs, Vec<Arc<Service>>>,
+    ) -> usize {
+        if stations.is_empty() {
+            return 0;
+        }
+
+        let mut api_calls = 0;
+
+        for batch in stations.chunks(self.config.batch_size) {
+            let futures: Vec<_> = batch
+                .iter()
+                .map(|station| async move {
+                    let result = self.provider.get_departures(station, after).await;
+                    (*station, result)
+                })
+                .collect();
+
+            let results = join_all(futures).await;
+
+            for (station, result) in results {
+                api_calls += 1;
+                match result {
+                    Ok(deps) => {
+                        cache.insert(station, deps);
+                    }
+                    Err(e) => {
+                        debug!(
+                            station = %station.as_str(),
+                            error = %e,
+                            "Failed to fetch departures, using empty"
+                        );
+                        // Insert empty vec so we don't retry
+                        cache.insert(station, vec![]);
+                    }
+                }
+            }
+        }
+
+        api_calls
+    }
+
+    /// Build a 2-change journey from components.
+    #[allow(clippy::too_many_arguments)]
+    fn build_two_change_journey(
+        &self,
+        first_train: &Arc<Service>,
+        board_first: CallIndex,
+        alight_first: CallIndex,
+        alight_first_station: &Crs,
+        board_second_station: &Crs,
+        walk_to_second: Duration,
+        second_train: &Arc<Service>,
+        board_second: CallIndex,
+        alight_second: CallIndex,
+        alight_second_station: &Crs,
+        board_third_station: &Crs,
+        walk_to_third: Duration,
+        third_train: &Arc<Service>,
+        board_third: CallIndex,
+        destination: &Crs,
+    ) -> Option<Journey> {
+        let leg1 = Leg::new(first_train.clone(), board_first, alight_first).ok()?;
+        let leg2 = Leg::new(second_train.clone(), board_second, alight_second).ok()?;
+
+        // Third train goes to destination
+        // Note: service may continue past destination, so find actual destination call
+        let alight_third_idx = third_train
+            .calls
+            .iter()
+            .position(|c| c.station == *destination)?;
+        let leg3 = Leg::new(
+            third_train.clone(),
+            board_third,
+            CallIndex(alight_third_idx),
+        )
+        .ok()?;
+
+        let mut segments = vec![Segment::Train(leg1)];
+
+        // Walk between first and second train if needed
+        if alight_first_station != board_second_station {
+            segments.push(Segment::Walk(Walk::new(
+                *alight_first_station,
+                *board_second_station,
+                walk_to_second,
+            )));
+        }
+
+        segments.push(Segment::Train(leg2));
+
+        // Walk between second and third train if needed
+        if alight_second_station != board_third_station {
+            segments.push(Segment::Walk(Walk::new(
+                *alight_second_station,
+                *board_third_station,
+                walk_to_third,
+            )));
+        }
+
+        segments.push(Segment::Train(leg3));
+
+        Journey::new(segments).ok()
     }
 }
 
 #[cfg(test)]
-mod tests {
+#[path = "search_tests.rs"]
+mod tests;
+
+/// Property-based tests comparing arrivals-first search against naive BFS.
+#[cfg(test)]
+mod proptests {
     use super::*;
     use crate::domain::{Call, ServiceRef};
+    use chrono::{NaiveDate, NaiveTime};
+    use proptest::prelude::*;
+    use std::collections::HashMap;
 
-    fn date() -> chrono::NaiveDate {
-        chrono::NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+    // ========== Test infrastructure ==========
+
+    fn date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
     }
 
-    fn time(s: &str) -> RailTime {
-        RailTime::parse_hhmm(s, date()).unwrap()
+    fn make_time(mins_from_midnight: u16) -> RailTime {
+        let hour = (mins_from_midnight / 60) as u32 % 24;
+        let min = (mins_from_midnight % 60) as u32;
+        let time = NaiveTime::from_hms_opt(hour, min, 0).unwrap();
+        RailTime::new(date(), time)
     }
 
     fn crs(s: &str) -> Crs {
         Crs::parse(s).unwrap()
     }
 
+    /// A small fixed set of station codes for testing.
+    const STATIONS: [&str; 8] = ["PAD", "RDG", "SWI", "BRI", "OXF", "DID", "KGX", "STP"];
+
+    fn station_crs(idx: usize) -> Crs {
+        crs(STATIONS[idx % STATIONS.len()])
+    }
+
+    /// Create a service with the given calls.
     fn make_service(
-        id: &str,
-        board_crs: &str,
-        calls_data: &[(&str, &str, &str, &str)],
+        id: usize,
+        calls_data: Vec<(usize, u16, u16)>, // (station_idx, arr_mins, dep_mins)
     ) -> Arc<Service> {
         let calls: Vec<Call> = calls_data
             .iter()
-            .map(|(station, name, arr, dep)| {
-                let mut call = Call::new(crs(station), (*name).to_string());
-                if !arr.is_empty() {
-                    call.booked_arrival = Some(time(arr));
+            .map(|(station_idx, arr_mins, dep_mins)| {
+                let station = station_crs(*station_idx);
+                let mut call = Call::new(station, format!("Station {}", station_idx));
+                if *arr_mins > 0 {
+                    call.booked_arrival = Some(make_time(*arr_mins));
                 }
-                if !dep.is_empty() {
-                    call.booked_departure = Some(time(dep));
+                if *dep_mins > 0 {
+                    call.booked_departure = Some(make_time(*dep_mins));
                 }
                 call
             })
             .collect();
 
+        let board_crs = calls.first().map(|c| c.station).unwrap_or(crs("PAD"));
+
         Arc::new(Service {
-            service_ref: ServiceRef::new(id.to_string(), crs(board_crs)),
+            service_ref: ServiceRef::new(format!("SVC{id}"), board_crs),
             headcode: None,
             operator: "Test".to_string(),
             operator_code: None,
@@ -715,882 +876,547 @@ mod tests {
         })
     }
 
-    /// Mock service provider for testing.
-    struct MockProvider {
-        services: Vec<Arc<Service>>,
+    /// Mock provider that serves from pre-configured data.
+    struct TestProvider {
+        departures: HashMap<Crs, Vec<Arc<Service>>>,
+        arrivals: HashMap<Crs, Vec<Arc<Service>>>,
     }
 
-    impl MockProvider {
-        fn new(services: Vec<Arc<Service>>) -> Self {
-            Self { services }
+    impl TestProvider {
+        fn new(services: &[Arc<Service>]) -> Self {
+            let mut departures: HashMap<Crs, Vec<Arc<Service>>> = HashMap::new();
+            let mut arrivals: HashMap<Crs, Vec<Arc<Service>>> = HashMap::new();
+
+            for service in services {
+                // Add to departures for each station (except last - can't depart from terminus)
+                for call in service
+                    .calls
+                    .iter()
+                    .take(service.calls.len().saturating_sub(1))
+                {
+                    departures
+                        .entry(call.station)
+                        .or_default()
+                        .push(service.clone());
+                }
+                // Add to arrivals for each station (except first - that's origin/departure only)
+                // This matches Darwin API behavior: arrivals at station X includes all services
+                // that call at X, not just those terminating there
+                for call in service.calls.iter().skip(1) {
+                    arrivals
+                        .entry(call.station)
+                        .or_default()
+                        .push(service.clone());
+                }
+            }
+
+            Self {
+                departures,
+                arrivals,
+            }
         }
     }
 
-    impl ServiceProvider for MockProvider {
+    impl ServiceProvider for TestProvider {
         async fn get_departures(
             &self,
             station: &Crs,
-            after: RailTime,
+            _after: RailTime,
         ) -> Result<Vec<Arc<Service>>, SearchError> {
-            Ok(self
-                .services
-                .iter()
-                .filter(|s| {
-                    s.calls.iter().any(|c| {
-                        &c.station == station && c.expected_departure().is_some_and(|t| t >= after)
-                    })
-                })
-                .cloned()
-                .collect())
+            Ok(self.departures.get(station).cloned().unwrap_or_default())
         }
-    }
 
-    #[tokio::test]
-    async fn direct_journey() {
-        // User is on PAD->RDG->SWI->BRI train, wants to go to BRI
-        let current = make_service(
-            "S1",
-            "PAD",
-            &[
-                ("PAD", "Paddington", "", "10:00"),
-                ("RDG", "Reading", "10:25", "10:27"),
-                ("SWI", "Swindon", "10:52", "10:54"),
-                ("BRI", "Bristol", "11:30", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(0), crs("BRI"));
-        let result = planner.search(&request).await.unwrap();
-
-        assert_eq!(result.journeys.len(), 1);
-        assert_eq!(result.journeys[0].change_count(), 0);
-        assert_eq!(result.journeys[0].arrival_time(), time("11:30"));
-    }
-
-    #[tokio::test]
-    async fn direct_journey_from_middle() {
-        // User is at RDG (position 1), wants to go to BRI
-        let current = make_service(
-            "S1",
-            "PAD",
-            &[
-                ("PAD", "Paddington", "", "10:00"),
-                ("RDG", "Reading", "10:25", "10:27"),
-                ("SWI", "Swindon", "10:52", "10:54"),
-                ("BRI", "Bristol", "11:30", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(1), crs("BRI"));
-        let result = planner.search(&request).await.unwrap();
-
-        assert_eq!(result.journeys.len(), 1);
-        assert_eq!(result.journeys[0].departure_time(), time("10:27"));
-        assert_eq!(result.journeys[0].arrival_time(), time("11:30"));
-    }
-
-    #[tokio::test]
-    async fn one_change_journey() {
-        // User is on PAD->RDG train, wants to go to OXF
-        // Connection at RDG to RDG->OXF train
-        let current = make_service(
-            "S1",
-            "PAD",
-            &[
-                ("PAD", "Paddington", "", "10:00"),
-                ("RDG", "Reading", "10:25", ""),
-            ],
-        );
-
-        let connection = make_service(
-            "S2",
-            "RDG",
-            &[
-                ("RDG", "Reading", "", "10:35"),
-                ("OXF", "Oxford", "11:00", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![connection]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(0), crs("OXF"));
-        let result = planner.search(&request).await.unwrap();
-
-        assert!(!result.journeys.is_empty());
-        let journey = &result.journeys[0];
-        assert_eq!(journey.change_count(), 1);
-        assert_eq!(journey.arrival_time(), time("11:00"));
-    }
-
-    #[tokio::test]
-    async fn journey_with_walk() {
-        // User is on train to EUS, wants to go to station served from KGX
-        // Walk EUS -> KGX, then train KGX -> destination
-        let current = make_service(
-            "S1",
-            "XXX",
-            &[
-                ("XXX", "Somewhere", "", "10:00"),
-                ("EUS", "Euston", "10:30", ""),
-            ],
-        );
-
-        let from_kgx = make_service(
-            "S2",
-            "KGX",
-            &[
-                ("KGX", "Kings Cross", "", "10:45"),
-                ("YRK", "York", "12:30", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![from_kgx]);
-
-        let mut walkable = WalkableConnections::new();
-        walkable.add(crs("EUS"), crs("KGX"), 5);
-
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(0), crs("YRK"));
-        let result = planner.search(&request).await.unwrap();
-
-        assert!(!result.journeys.is_empty());
-        let journey = &result.journeys[0];
-        // One train + walk + one train
-        assert!(journey.segments().len() >= 2);
-    }
-
-    #[tokio::test]
-    async fn invalid_request_position_out_of_bounds() {
-        let current = make_service(
-            "S1",
-            "PAD",
-            &[
-                ("PAD", "Paddington", "", "10:00"),
-                ("RDG", "Reading", "10:25", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(10), crs("BRI"));
-        let result = planner.search(&request).await;
-
-        assert!(matches!(result, Err(SearchError::InvalidRequest(_))));
-    }
-
-    #[tokio::test]
-    async fn invalid_request_no_subsequent_stops() {
-        let current = make_service(
-            "S1",
-            "PAD",
-            &[
-                ("PAD", "Paddington", "", "10:00"),
-                ("RDG", "Reading", "10:25", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        // Position at last stop - no subsequent stops
-        let request = SearchRequest::new(current, CallIndex(1), crs("BRI"));
-        let result = planner.search(&request).await;
-
-        assert!(matches!(result, Err(SearchError::InvalidRequest(_))));
-    }
-
-    #[tokio::test]
-    async fn respects_max_changes() {
-        // Setup where destination requires 4 changes but max is 3
-        let current = make_service(
-            "S1",
-            "AAA",
-            &[
-                ("AAA", "Station A", "", "10:00"),
-                ("BBB", "Station B", "10:15", ""),
-            ],
-        );
-
-        // Chain of connections
-        let s2 = make_service(
-            "S2",
-            "BBB",
-            &[
-                ("BBB", "Station B", "", "10:25"),
-                ("CCC", "Station C", "10:40", ""),
-            ],
-        );
-        let s3 = make_service(
-            "S3",
-            "CCC",
-            &[
-                ("CCC", "Station C", "", "10:50"),
-                ("DDD", "Station D", "11:05", ""),
-            ],
-        );
-        let s4 = make_service(
-            "S4",
-            "DDD",
-            &[
-                ("DDD", "Station D", "", "11:15"),
-                ("EEE", "Station E", "11:30", ""),
-            ],
-        );
-        let s5 = make_service(
-            "S5",
-            "EEE",
-            &[
-                ("EEE", "Station E", "", "11:40"),
-                ("FFF", "Station F", "11:55", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![s2, s3, s4, s5]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig {
-            max_changes: 2, // Only allow 2 changes
-            ..Default::default()
-        };
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(0), crs("FFF"));
-        let result = planner.search(&request).await.unwrap();
-
-        // Should not find route to FFF (would need 4 changes)
-        // But might find routes to intermediate stations
-        for journey in &result.journeys {
-            assert!(journey.change_count() <= 2);
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_result_when_no_route() {
-        let current = make_service(
-            "S1",
-            "PAD",
-            &[
-                ("PAD", "Paddington", "", "10:00"),
-                ("RDG", "Reading", "10:25", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![]); // No connections
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        // Destination not on current train and no connections
-        let request = SearchRequest::new(current, CallIndex(0), crs("XXX"));
-        let result = planner.search(&request).await.unwrap();
-
-        assert!(result.journeys.is_empty());
-    }
-
-    /// Regression test for bug where connections departing significantly after arrival
-    /// were missed. This happened when the ServiceProvider used a fixed time_offset=0
-    /// for Darwin queries, causing it to return trains from "now" rather than from
-    /// when the user would actually arrive at the connection station.
-    ///
-    /// Scenario: User arrives at MAN at 08:59, connection train departs at 10:00.
-    /// With proper time_offset calculation, this connection should be found.
-    #[tokio::test]
-    async fn finds_connection_departing_well_after_arrival() {
-        // Current train: CRE -> SPT -> MAN (arriving 08:59)
-        let current = make_service(
-            "S1",
-            "CRE",
-            &[
-                ("CRE", "Crewe", "", "08:27"),
-                ("SPT", "Stockport", "08:50", "08:51"),
-                ("MAN", "Manchester Piccadilly", "08:59", ""),
-            ],
-        );
-
-        // Connection from MAN at 10:00 to YRK (61 minutes after arrival)
-        let connection = make_service(
-            "S2",
-            "MAN",
-            &[
-                ("MAN", "Manchester Piccadilly", "", "10:00"),
-                ("YRK", "York", "11:15", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![connection]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        let request = SearchRequest::new(current, CallIndex(0), crs("YRK"));
-        let result = planner.search(&request).await.unwrap();
-
-        assert!(
-            !result.journeys.is_empty(),
-            "Should find journey via Manchester even when connection is 61 mins after arrival"
-        );
-        let journey = &result.journeys[0];
-        assert_eq!(journey.change_count(), 1);
-        assert_eq!(journey.arrival_time(), time("11:15"));
-    }
-
-    #[tokio::test]
-    async fn intermediate_stops_with_only_departure_times() {
-        // Simulates Elizabeth Line / Darwin behavior where intermediate calling points
-        // only have departure times (no arrival times). The search should still generate
-        // initial states for these stops by falling back to departure time.
-        //
-        // Route: ZLW -> LST -> ZFD -> PAD (terminus)
-        // Only ZFD has a connection to CTK (destination)
-        let mut zlw = Call::new(crs("ZLW"), "Whitechapel".into());
-        zlw.booked_departure = Some(time("23:00"));
-
-        let mut lst = Call::new(crs("LST"), "Liverpool Street".into());
-        lst.booked_departure = Some(time("23:05")); // No arrival time!
-
-        let mut zfd = Call::new(crs("ZFD"), "Farringdon".into());
-        zfd.booked_departure = Some(time("23:08")); // No arrival time!
-
-        let mut pad = Call::new(crs("PAD"), "Paddington".into());
-        pad.booked_arrival = Some(time("23:20")); // Terminus has arrival
-
-        let current = Arc::new(Service {
-            service_ref: ServiceRef::new("ELIZ1".into(), crs("ZLW")),
-            headcode: None,
-            operator: "Elizabeth Line".into(),
-            operator_code: None,
-            calls: vec![zlw, lst, zfd, pad],
-            board_station_idx: CallIndex(0),
-        });
-
-        // Connection from ZFD to CTK (Thameslink)
-        let connection = make_service(
-            "TL1",
-            "ZFD",
-            &[
-                ("ZFD", "Farringdon", "", "23:15"),
-                ("CTK", "City Thameslink", "23:18", ""),
-            ],
-        );
-
-        let provider = MockProvider::new(vec![connection]);
-        let walkable = WalkableConnections::new();
-        let config = SearchConfig::default();
-
-        let planner = Planner::new(&provider, &walkable, &config);
-
-        // User at ZLW (position 0), wants CTK
-        let request = SearchRequest::new(current, CallIndex(0), crs("CTK"));
-        let result = planner.search(&request).await.unwrap();
-
-        // Should find the journey: ZLW->ZFD (Elizabeth Line) + ZFD->CTK (Thameslink)
-        assert!(
-            !result.journeys.is_empty(),
-            "Should find journey via Farringdon even though intermediate stops lack arrival times"
-        );
-        let journey = &result.journeys[0];
-        assert_eq!(journey.change_count(), 1);
-        assert_eq!(journey.arrival_time(), time("23:18"));
-    }
-}
-
-/// Property-based tests comparing BFS planner to reference implementation.
-#[cfg(test)]
-mod proptests {
-    use super::*;
-    use crate::domain::{Call, ServiceRef};
-    use crate::planner::rank::remove_dominated;
-    use chrono::{NaiveDate, NaiveTime};
-    use proptest::prelude::*;
-    use std::collections::HashSet;
-
-    /// Mock service provider for testing
-    struct MockProvider {
-        services: Vec<Arc<Service>>,
-    }
-
-    impl ServiceProvider for MockProvider {
-        async fn get_departures(
+        async fn get_arrivals(
             &self,
             station: &Crs,
-            after: RailTime,
+            _after: RailTime,
         ) -> Result<Vec<Arc<Service>>, SearchError> {
-            Ok(self
-                .services
-                .iter()
-                .filter(|s| {
-                    s.calls.iter().any(|c| {
-                        &c.station == station && c.expected_departure().is_some_and(|t| t >= after)
-                    })
-                })
-                .cloned()
-                .collect())
+            Ok(self.arrivals.get(station).cloned().unwrap_or_default())
         }
     }
 
-    /// Helper to run async search in a blocking context for proptest
-    fn block_on_search<P: ServiceProvider>(
-        planner: &Planner<'_, P>,
-        request: &SearchRequest,
-    ) -> Result<SearchResult, SearchError> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(planner.search(request))
-    }
+    // ========== Naive BFS reference implementation ==========
 
-    fn date() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
-    }
-
-    fn make_time(hour: u32, min: u32) -> RailTime {
-        let time = NaiveTime::from_hms_opt(hour % 24, min % 60, 0).unwrap();
-        RailTime::new(date(), time)
-    }
-
-    // Station codes for our test network
-    const STATIONS: [&str; 6] = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"];
-
-    fn station_crs(idx: usize) -> Crs {
-        Crs::parse(STATIONS[idx % STATIONS.len()]).unwrap()
-    }
-
-    /// Generate a service connecting two stations
-    fn make_test_service(
-        id: u32,
-        from_idx: usize,
-        to_idx: usize,
-        dep_mins: u16,
-        duration_mins: u16,
-    ) -> Arc<Service> {
-        let from = station_crs(from_idx);
-        let to = station_crs(to_idx);
-
-        let dep_hour = (dep_mins / 60) as u32 % 24;
-        let dep_min = (dep_mins % 60) as u32;
-        let arr_mins = dep_mins + duration_mins;
-        let arr_hour = (arr_mins / 60) as u32 % 24;
-        let arr_min = (arr_mins % 60) as u32;
-
-        let mut origin = Call::new(from, format!("Station {}", from_idx));
-        origin.booked_departure = Some(make_time(dep_hour, dep_min));
-
-        let mut dest = Call::new(to, format!("Station {}", to_idx));
-        dest.booked_arrival = Some(make_time(arr_hour, arr_min));
-
-        Arc::new(Service {
-            service_ref: ServiceRef::new(format!("SVC{id}"), from),
-            headcode: None,
-            operator: "Test".to_string(),
-            operator_code: None,
-            calls: vec![origin, dest],
-            board_station_idx: CallIndex(0),
-        })
-    }
-
-    /// Generate a service network: list of services connecting stations
-    fn network_strategy() -> impl Strategy<Value = Vec<Arc<Service>>> {
-        // Generate 3-10 services
-        prop::collection::vec(
-            (
-                0u32..100,  // id
-                0usize..6,  // from station
-                0usize..6,  // to station (different from from)
-                0u16..1200, // dep_mins
-                15u16..60,  // duration
-            ),
-            3..10,
-        )
-        .prop_map(|params| {
-            params
-                .into_iter()
-                .enumerate()
-                .filter_map(|(i, (id, from, to, dep, dur))| {
-                    // Skip self-loops
-                    if from == to {
-                        return None;
-                    }
-                    Some(make_test_service(id + i as u32 * 100, from, to, dep, dur))
-                })
-                .collect()
-        })
-    }
-
-    /// Reference implementation: exhaustive DFS search
-    /// Returns all valid journeys from current service/position to destination
-    fn reference_search(
-        current_service: &Arc<Service>,
-        current_position: CallIndex,
-        destination: &Crs,
-        services: &[Arc<Service>],
+    /// Naive BFS search - simple, obviously correct, but inefficient.
+    /// This is the reference implementation we compare against.
+    async fn naive_bfs_search<P: ServiceProvider>(
+        provider: &P,
         walkable: &WalkableConnections,
         config: &SearchConfig,
-    ) -> Vec<Journey> {
-        let mut results = Vec::new();
-        let mut used = HashSet::new();
-        used.insert(current_service.service_ref.darwin_id.clone());
+        request: &SearchRequest,
+    ) -> Result<Vec<Journey>, SearchError> {
+        let mut journeys = Vec::new();
+        let min_connection = config.min_connection();
+        let max_journey = config.max_journey();
+        let max_walk = config.max_walk();
 
-        // Try direct route first
-        if let Some((dest_idx, _)) = current_service.find_call(destination, current_position.next())
-            && let Ok(leg) = Leg::new(current_service.clone(), current_position, dest_idx)
-            && let Ok(journey) = Journey::new(vec![Segment::Train(leg)])
-        {
-            results.push(journey);
+        let start_time = match request.current_time() {
+            Some(t) => t,
+            None => return Ok(journeys),
+        };
+
+        // BFS state
+        #[derive(Clone)]
+        struct State {
+            segments: Vec<Segment>,
+            station: Crs,
+            available_time: RailTime,
+            changes: usize,
         }
 
-        // DFS from each intermediate alighting point
-        for alight_idx in (current_position.0 + 1)..current_service.calls.len() {
-            let alight_call = &current_service.calls[alight_idx];
-            let alight_time = match alight_call.expected_arrival() {
+        // Check direct journey first
+        let train = &request.current_service;
+        let pos = request.current_position.0;
+
+        for (idx, call) in train.calls.iter().enumerate().skip(pos) {
+            if call.station == request.destination && !call.is_cancelled {
+                let leg = Leg::new(train.clone(), request.current_position, CallIndex(idx)).ok();
+                if let Some(leg) = leg
+                    && let Ok(j) = Journey::new(vec![Segment::Train(leg)])
+                {
+                    journeys.push(j);
+                }
+            }
+        }
+
+        // Initialize frontier
+        let mut frontier: Vec<State> = Vec::new();
+
+        for (alight_idx, alight_call) in train.calls.iter().enumerate().skip(pos) {
+            if alight_call.is_cancelled || alight_call.station == request.destination {
+                continue;
+            }
+
+            let arrival_time = match alight_call
+                .expected_arrival()
+                .or_else(|| alight_call.expected_departure())
+            {
                 Some(t) => t,
                 None => continue,
             };
 
-            if let Ok(first_leg) = Leg::new(
-                current_service.clone(),
-                current_position,
+            let leg = match Leg::new(
+                train.clone(),
+                request.current_position,
                 CallIndex(alight_idx),
             ) {
-                let first_segment = Segment::Train(first_leg);
+                Ok(l) => l,
+                Err(_) => continue,
+            };
 
-                // If this is the destination, we're done
-                if &alight_call.station == destination {
-                    if let Ok(journey) = Journey::new(vec![first_segment.clone()]) {
-                        results.push(journey);
-                    }
+            frontier.push(State {
+                segments: vec![Segment::Train(leg.clone())],
+                station: alight_call.station,
+                available_time: arrival_time + min_connection,
+                changes: 0,
+            });
+
+            // Walkable neighbors
+            for (walkable_station, walk_time) in walkable.walkable_from(&alight_call.station) {
+                if walk_time > max_walk {
+                    continue;
+                }
+                let walk = Walk::new(alight_call.station, walkable_station, walk_time);
+                frontier.push(State {
+                    segments: vec![Segment::Train(leg.clone()), Segment::Walk(walk)],
+                    station: walkable_station,
+                    available_time: arrival_time + walk_time + min_connection,
+                    changes: 1,
+                });
+            }
+        }
+
+        // BFS exploration
+        while !frontier.is_empty() {
+            let mut next_frontier: Vec<State> = Vec::new();
+
+            for state in frontier {
+                if state.changes >= config.max_changes {
                     continue;
                 }
 
-                // Otherwise, recurse
-                reference_dfs(
-                    &alight_call.station,
-                    alight_time,
-                    destination,
-                    vec![first_segment],
-                    0,
-                    &used,
-                    services,
-                    walkable,
-                    config,
-                    &mut results,
-                );
-            }
-        }
+                let elapsed = state.available_time.signed_duration_since(start_time);
+                if elapsed > max_journey {
+                    continue;
+                }
 
-        results
-    }
+                // Get departures
+                let departures = provider
+                    .get_departures(&state.station, state.available_time)
+                    .await?;
 
-    /// DFS helper for reference search
-    #[allow(clippy::too_many_arguments)]
-    fn reference_dfs(
-        station: &Crs,
-        time: RailTime,
-        destination: &Crs,
-        segments: Vec<Segment>,
-        changes: usize,
-        used: &HashSet<String>,
-        services: &[Arc<Service>],
-        walkable: &WalkableConnections,
-        config: &SearchConfig,
-        results: &mut Vec<Journey>,
-    ) {
-        // Pruning
-        if changes >= config.max_changes {
-            return;
-        }
+                for service in &departures {
+                    let board_idx = match service
+                        .calls
+                        .iter()
+                        .position(|c| c.station == state.station)
+                    {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
 
-        // Check journey time
-        let first_dep = segments.first().map(|s| match s {
-            Segment::Train(leg) => leg.departure_time(),
-            Segment::Walk(_) => time,
-        });
-        if let Some(dep) = first_dep
-            && time.signed_duration_since(dep) > config.max_journey()
-        {
-            return;
-        }
+                    let board_call = &service.calls[board_idx];
+                    let board_time = match board_call.expected_departure() {
+                        Some(t) => t,
+                        None => continue,
+                    };
 
-        // Limit recursion depth to avoid infinite loops
-        if segments.len() > 10 {
-            return;
-        }
+                    if board_time < state.available_time {
+                        continue;
+                    }
 
-        let min_connection = time + config.min_connection();
-
-        // Try each service
-        for service in services {
-            if used.contains(&service.service_ref.darwin_id) {
-                continue;
-            }
-
-            // Find if this service stops at our station
-            let board_idx = service.calls.iter().position(|c| {
-                &c.station == station
-                    && c.expected_departure()
-                        .is_some_and(|dep| dep >= min_connection)
-            });
-
-            let board_idx = match board_idx {
-                Some(i) => CallIndex(i),
-                None => continue,
-            };
-
-            // Try alighting at each subsequent stop
-            for alight_idx in (board_idx.0 + 1)..service.calls.len() {
-                let alight_call = &service.calls[alight_idx];
-                let alight_time = match alight_call.expected_arrival() {
-                    Some(t) => t,
-                    None => continue,
-                };
-
-                if let Ok(leg) = Leg::new(service.clone(), board_idx, CallIndex(alight_idx)) {
-                    let mut new_segments = segments.clone();
-                    new_segments.push(Segment::Train(leg));
-
-                    // Check if we reached destination
-                    if &alight_call.station == destination {
-                        if let Ok(journey) = Journey::new(new_segments) {
-                            results.push(journey);
+                    for (alight_idx, alight_call) in
+                        service.calls.iter().enumerate().skip(board_idx + 1)
+                    {
+                        if alight_call.is_cancelled {
+                            continue;
                         }
-                    } else {
-                        // Recurse
-                        let mut new_used = used.clone();
-                        new_used.insert(service.service_ref.darwin_id.clone());
 
-                        reference_dfs(
-                            &alight_call.station,
-                            alight_time,
-                            destination,
-                            new_segments,
-                            changes + 1,
-                            &new_used,
-                            services,
-                            walkable,
-                            config,
-                            results,
-                        );
+                        let arrival_time = match alight_call
+                            .expected_arrival()
+                            .or_else(|| alight_call.expected_departure())
+                        {
+                            Some(t) => t,
+                            None => continue,
+                        };
+
+                        let total_so_far = arrival_time.signed_duration_since(start_time);
+                        if total_so_far > max_journey {
+                            continue;
+                        }
+
+                        let leg = match Leg::new(
+                            service.clone(),
+                            CallIndex(board_idx),
+                            CallIndex(alight_idx),
+                        ) {
+                            Ok(l) => l,
+                            Err(_) => continue,
+                        };
+
+                        let mut new_segments = state.segments.clone();
+                        new_segments.push(Segment::Train(leg));
+
+                        // Check if reached destination
+                        if alight_call.station == request.destination {
+                            if let Ok(j) = Journey::new(new_segments.clone()) {
+                                journeys.push(j);
+                            }
+                            continue;
+                        }
+
+                        // Add to next frontier
+                        next_frontier.push(State {
+                            segments: new_segments.clone(),
+                            station: alight_call.station,
+                            available_time: arrival_time + min_connection,
+                            changes: state.changes + 1,
+                        });
+
+                        // Walkable neighbors
+                        for (walkable_station, walk_time) in
+                            walkable.walkable_from(&alight_call.station)
+                        {
+                            if walk_time > max_walk {
+                                continue;
+                            }
+
+                            // Check if walk reaches destination
+                            if walkable_station == request.destination {
+                                let walk =
+                                    Walk::new(alight_call.station, walkable_station, walk_time);
+                                let mut walk_segments = new_segments.clone();
+                                walk_segments.push(Segment::Walk(walk));
+                                if let Ok(j) = Journey::new(walk_segments) {
+                                    journeys.push(j);
+                                }
+                                continue;
+                            }
+
+                            let walk = Walk::new(alight_call.station, walkable_station, walk_time);
+                            let mut walk_segments = new_segments.clone();
+                            walk_segments.push(Segment::Walk(walk));
+
+                            next_frontier.push(State {
+                                segments: walk_segments,
+                                station: walkable_station,
+                                available_time: arrival_time + walk_time + min_connection,
+                                changes: state.changes + 1,
+                            });
+                        }
                     }
                 }
             }
+
+            frontier = next_frontier;
         }
 
-        // Try walking
-        for (walk_to, walk_duration) in walkable.walkable_from(station) {
-            if walk_duration > config.max_walk() {
-                continue;
-            }
-
-            let walk = Walk {
-                from: *station,
-                to: walk_to,
-                duration: walk_duration,
-            };
-            let walk_arrival = time + walk_duration;
-
-            let mut new_segments = segments.clone();
-            new_segments.push(Segment::Walk(walk));
-
-            // Check if walk destination is our destination
-            if walk_to == *destination {
-                if let Ok(journey) = Journey::new(new_segments) {
-                    results.push(journey);
-                }
-            } else {
-                // Recurse (walking doesn't count as a change)
-                reference_dfs(
-                    &walk_to,
-                    walk_arrival,
-                    destination,
-                    new_segments,
-                    changes,
-                    used,
-                    services,
-                    walkable,
-                    config,
-                    results,
-                );
-            }
-        }
+        Ok(journeys)
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(50))]
+    // ========== Proptest strategies ==========
 
-        /// BFS should find all Pareto-optimal journeys that reference finds
-        #[test]
-        fn bfs_finds_pareto_optimal(network in network_strategy()) {
-            // Skip empty networks
-            if network.is_empty() {
-                return Ok(());
-            }
+    /// Generate a valid service (sequence of calls with increasing times).
+    /// Ensures no station is visited twice (no loops).
+    fn service_strategy(id: usize) -> impl Strategy<Value = Arc<Service>> {
+        // Generate 2-5 UNIQUE station indices
+        (
+            // Use prop_shuffle to get unique stations
+            Just(Vec::from_iter(0..STATIONS.len()))
+                .prop_shuffle()
+                .prop_map(|v| v.into_iter().take(5).collect::<Vec<_>>()),
+            // Number of calls (2-5, but at most the number of unique stations)
+            2usize..=5,
+            // Start time in minutes from midnight (6am - 10pm)
+            360u16..1320,
+        )
+            .prop_flat_map(move |(shuffled_stations, n_calls, start_time)| {
+                let n_calls = n_calls.min(shuffled_stations.len());
+                let station_indices: Vec<usize> =
+                    shuffled_stations.into_iter().take(n_calls).collect();
 
-            // Pick first service as current, destination = last station
-            let current = network[0].clone();
-            let dest = station_crs(5); // FFF
+                // Generate time gaps between stations (10-60 mins each)
+                let n_gaps = station_indices.len().saturating_sub(1);
+                prop::collection::vec(10u16..60, n_gaps).prop_map(move |gaps| {
+                    let mut calls_data = Vec::new();
+                    let mut current_time = start_time;
 
-            // Build mock provider
-            let provider = MockProvider { services: network.clone() };
+                    for (i, &station_idx) in station_indices.iter().enumerate() {
+                        let arr_mins = if i == 0 { 0 } else { current_time };
+                        let dep_mins = if i == station_indices.len() - 1 {
+                            0
+                        } else {
+                            current_time + 2 // 2 min dwell time
+                        };
+                        calls_data.push((station_idx, arr_mins, dep_mins));
+
+                        if i < gaps.len() {
+                            current_time += gaps[i];
+                        }
+                    }
+
+                    make_service(id, calls_data)
+                })
+            })
+    }
+
+    /// Generate a network of services.
+    fn network_strategy() -> impl Strategy<Value = Vec<Arc<Service>>> {
+        // Generate 3-8 services
+        (3usize..=8).prop_flat_map(|n_services| {
+            let strategies: Vec<_> = (0..n_services).map(service_strategy).collect();
+            strategies
+                .into_iter()
+                .collect::<Vec<_>>()
+                .prop_map(|services| services)
+        })
+    }
+
+    /// Generate a search request for a given network.
+    fn search_request_strategy(
+        services: Vec<Arc<Service>>,
+    ) -> impl Strategy<Value = (Vec<Arc<Service>>, SearchRequest, Crs)> {
+        // Pick a random service as current train
+        let n_services = services.len();
+        (0..n_services, 0usize..STATIONS.len()).prop_map(move |(svc_idx, dest_idx)| {
+            let current_service = services[svc_idx % services.len()].clone();
+            let pos = 0; // Start at first stop
+            let destination = station_crs(dest_idx);
+            let request = SearchRequest::new(current_service, CallIndex(pos), destination);
+            (services.clone(), request, destination)
+        })
+    }
+
+    /// Combined strategy: generate network + search request.
+    fn scenario_strategy() -> impl Strategy<Value = (Vec<Arc<Service>>, SearchRequest, Crs)> {
+        network_strategy().prop_flat_map(search_request_strategy)
+    }
+
+    // ========== Property tests ==========
+
+    /// For every arrival time found by naive BFS, arrivals-first should
+    /// find a journey arriving at the same time or earlier.
+    ///
+    /// Note: this is weaker than "finds all journeys"—a single early
+    /// journey can satisfy multiple naive arrival times.
+    fn arrivals_first_dominates_naive_arrival_times(
+        services: Vec<Arc<Service>>,
+        request: SearchRequest,
+    ) -> Result<(), TestCaseError> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let provider = TestProvider::new(&services);
             let walkable = WalkableConnections::new();
             let config = SearchConfig {
                 max_changes: 2,
-                max_results: 100, // Don't limit results for comparison
-                ..Default::default()
+                max_results: 100,
+                ..SearchConfig::default()
             };
 
-            // Run BFS
+            // Run naive BFS
+            let naive_journeys = naive_bfs_search(&provider, &walkable, &config, &request).await?;
+
+            // Run arrivals-first search
             let planner = Planner::new(&provider, &walkable, &config);
-            let request = SearchRequest::new(current.clone(), CallIndex(0), dest);
+            let arrivals_first_result = planner.search(&request).await?;
 
-            // Skip invalid requests
-            if request.validate().is_err() {
-                return Ok(());
-            }
+            // For each journey found by naive BFS, check that arrivals-first
+            // found a journey that arrives at the same time or earlier
+            let arrivals_first_times: Vec<_> = arrivals_first_result
+                .journeys
+                .iter()
+                .map(|j| j.arrival_time())
+                .collect();
 
-            let bfs_result = block_on_search(&planner, &request)?;
+            for naive_journey in &naive_journeys {
+                let naive_arrival = naive_journey.arrival_time();
 
-            // Run reference
-            let ref_journeys = reference_search(
-                &current,
-                CallIndex(0),
-                &dest,
-                &network,
-                &walkable,
-                &config,
-            );
+                // Check if arrivals-first found any journey arriving <= naive_arrival
+                let found_equivalent_or_better =
+                    arrivals_first_times.iter().any(|&t| t <= naive_arrival);
 
-            // Get Pareto-optimal from reference
-            let ref_pareto = remove_dominated(ref_journeys);
+                // Debug: show journey details
+                let naive_route: Vec<_> = naive_journey
+                    .segments()
+                    .iter()
+                    .map(|s| match s {
+                        Segment::Train(leg) => format!(
+                            "{}({})@{}->{}@{}",
+                            leg.service().service_ref.darwin_id,
+                            leg.service().calls.len(),
+                            leg.board_station().as_str(),
+                            leg.alight_station().as_str(),
+                            leg.alight_idx().0
+                        ),
+                        Segment::Walk(w) => format!("walk:{}->{}", w.from.as_str(), w.to.as_str()),
+                    })
+                    .collect();
 
-            // Every Pareto-optimal journey from reference should have a
-            // non-dominated equivalent in BFS results
-            for ref_j in &ref_pareto {
-                let has_equivalent = bfs_result.journeys.iter().any(|bfs_j| {
-                    // Either same or BFS dominates it (both acceptable)
-                    bfs_j.arrival_time() <= ref_j.arrival_time()
-                        && bfs_j.change_count() <= ref_j.change_count()
-                        && bfs_j.total_duration() <= ref_j.total_duration()
-                });
+                let current_train_route: Vec<_> = request
+                    .current_service
+                    .calls
+                    .iter()
+                    .map(|c| c.station.as_str())
+                    .collect();
 
                 prop_assert!(
-                    has_equivalent,
-                    "BFS missed Pareto-optimal journey: arr={:?}, changes={}, dur={:?}",
-                    ref_j.arrival_time(),
-                    ref_j.change_count(),
-                    ref_j.total_duration()
+                    found_equivalent_or_better,
+                    "Naive BFS found journey arriving at {:?}, but arrivals-first \
+                     didn't find any journey arriving at or before that time.\n\
+                     Current train: {:?}\n\
+                     Naive journey route: {:?}\n\
+                     Naive journeys: {}\n\
+                     Arrivals-first journeys: {}",
+                    naive_arrival,
+                    current_train_route,
+                    naive_route,
+                    naive_journeys.len(),
+                    arrivals_first_result.journeys.len()
                 );
-            }
-        }
-
-        /// All BFS results should satisfy constraints
-        #[test]
-        fn bfs_respects_constraints(network in network_strategy()) {
-            if network.is_empty() {
-                return Ok(());
-            }
-
-            let current = network[0].clone();
-            let dest = station_crs(5);
-
-            let provider = MockProvider { services: network };
-            let walkable = WalkableConnections::new();
-            let config = SearchConfig {
-                max_changes: 2,
-                ..Default::default()
-            };
-
-            let planner = Planner::new(&provider, &walkable, &config);
-            let request = SearchRequest::new(current, CallIndex(0), dest);
-
-            if request.validate().is_err() {
-                return Ok(());
-            }
-
-            let result = block_on_search(&planner, &request)?;
-
-            for journey in &result.journeys {
-                prop_assert!(
-                    journey.change_count() <= config.max_changes,
-                    "Journey exceeds max_changes"
-                );
-            }
-        }
-    }
-
-    // Instrumented test to verify we find journeys sometimes
-    #[test]
-    fn search_finds_some_journeys() {
-        use proptest::test_runner::{Config, TestRunner};
-        use std::cell::Cell;
-
-        let mut runner = TestRunner::new(Config::with_cases(100));
-        let journeys_found = Cell::new(0u32);
-        let tests_with_valid_request = Cell::new(0u32);
-
-        let _ = runner.run(&network_strategy(), |network| {
-            if network.is_empty() {
-                return Ok(());
-            }
-
-            let current = network[0].clone();
-            let dest = station_crs(5);
-
-            let provider = MockProvider {
-                services: network.clone(),
-            };
-            let walkable = WalkableConnections::new();
-            let config = SearchConfig::default();
-
-            let planner = Planner::new(&provider, &walkable, &config);
-            let request = SearchRequest::new(current, CallIndex(0), dest);
-
-            if request.validate().is_ok() {
-                tests_with_valid_request.set(tests_with_valid_request.get() + 1);
-
-                if let Ok(result) = block_on_search(&planner, &request)
-                    && !result.journeys.is_empty()
-                {
-                    journeys_found.set(journeys_found.get() + 1);
-                }
             }
 
             Ok(())
-        });
+        })
+    }
 
-        // Not all random networks will have routes, but some should
-        // This is informational - print stats
-        println!(
-            "Found journeys in {}/{} valid tests",
-            journeys_found.get(),
-            tests_with_valid_request.get()
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn arrivals_first_complete((services, request, _dest) in scenario_strategy()) {
+            arrivals_first_dominates_naive_arrival_times(services, request)?;
+        }
+    }
+
+    // ========== Focused tests for edge cases ==========
+
+    /// Test with a scenario requiring exactly 3 changes.
+    #[tokio::test]
+    async fn reference_three_change_journey() {
+        // PAD -> AAA -> BBB -> RDG -> BRI (destination)
+        let current_train = make_service(
+            0,
+            vec![
+                (0, 0, 600), // PAD depart 10:00
+                (4, 630, 0), // OXF arrive 10:30
+            ],
+        );
+
+        // OXF -> DID
+        let bridge1 = make_service(
+            1,
+            vec![
+                (4, 0, 640), // OXF depart 10:40
+                (5, 700, 0), // DID arrive 11:40
+            ],
+        );
+
+        // DID -> RDG
+        let bridge2 = make_service(
+            2,
+            vec![
+                (5, 0, 710), // DID depart 11:50
+                (1, 750, 0), // RDG arrive 12:30
+            ],
+        );
+
+        // RDG -> BRI (arriving service)
+        let final_service = make_service(
+            3,
+            vec![
+                (1, 0, 800), // RDG depart 13:20
+                (3, 850, 0), // BRI arrive 14:10
+            ],
+        );
+
+        let services = vec![current_train.clone(), bridge1, bridge2, final_service];
+
+        let provider = TestProvider::new(&services);
+        let walkable = WalkableConnections::new();
+        let config = SearchConfig {
+            max_changes: 3,
+            ..SearchConfig::default()
+        };
+
+        let request = SearchRequest::new(current_train, CallIndex(0), crs("BRI"));
+
+        // Run both algorithms
+        let naive_journeys = naive_bfs_search(&provider, &walkable, &config, &request)
+            .await
+            .unwrap();
+
+        let planner = Planner::new(&provider, &walkable, &config);
+        let arrivals_first = planner.search(&request).await.unwrap();
+
+        // Both should find at least one journey
+        assert!(
+            !naive_journeys.is_empty(),
+            "Naive BFS should find at least one journey"
+        );
+        assert!(
+            !arrivals_first.journeys.is_empty(),
+            "Arrivals-first should find at least one journey"
+        );
+
+        // Arrivals-first should find journey with same or better arrival time
+        let naive_best = naive_journeys
+            .iter()
+            .map(|j| j.arrival_time())
+            .min()
+            .unwrap();
+        let af_best = arrivals_first
+            .journeys
+            .iter()
+            .map(|j| j.arrival_time())
+            .min()
+            .unwrap();
+
+        assert!(
+            af_best <= naive_best,
+            "Arrivals-first best ({:?}) should be <= naive best ({:?})",
+            af_best,
+            naive_best
         );
     }
 }
