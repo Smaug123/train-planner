@@ -1067,7 +1067,7 @@ mod proptests {
                     segments: vec![Segment::Train(leg.clone()), Segment::Walk(walk)],
                     station: walkable_station,
                     available_time: arrival_time + walk_time + min_connection,
-                    changes: 1,
+                    changes: 0, // Walks don't count as changes
                 });
             }
         }
@@ -1484,6 +1484,79 @@ mod proptests {
             "Arrivals-first best ({:?}) should be <= naive best ({:?})",
             af_best,
             naive_best
+        );
+    }
+
+    /// Walks before first connection should not count as a change.
+    ///
+    /// Regression test: naive_bfs_search previously set `changes: 1` for initial
+    /// walk states, which would incorrectly exclude valid 1-change journeys that
+    /// require walking before the first train connection.
+    #[tokio::test]
+    async fn walk_before_first_connection_does_not_count_as_change() {
+        // Network setup:
+        // - Current train goes PAD -> OXF only
+        // - No direct service from OXF to destination BRI
+        // - But DID (walkable from OXF) has a train to BRI
+        // With max_changes: 1, the journey Train→Walk→Train should be found
+        // because the walk doesn't count as a change.
+
+        let current_train = make_service(
+            0,
+            vec![
+                (0, 0, 600), // PAD depart 10:00
+                (4, 630, 0), // OXF arrive 10:30
+            ],
+        );
+
+        // DID -> BRI (only reachable by walking from OXF)
+        let connecting_train = make_service(
+            1,
+            vec![
+                (5, 0, 650), // DID depart 10:50
+                (3, 720, 0), // BRI arrive 12:00
+            ],
+        );
+
+        let services = vec![current_train.clone(), connecting_train];
+        let provider = TestProvider::new(&services);
+
+        // OXF -> DID is walkable (10 minutes)
+        let mut walkable = WalkableConnections::new();
+        walkable.add(crs("OXF"), crs("DID"), 10);
+
+        let config = SearchConfig {
+            max_changes: 1, // Key: only 1 change allowed
+            ..SearchConfig::default()
+        };
+
+        let request = SearchRequest::new(current_train, CallIndex(0), crs("BRI"));
+
+        let journeys = naive_bfs_search(&provider, &walkable, &config, &request)
+            .await
+            .unwrap();
+
+        // Should find: PAD→OXF (train) → OXF→DID (walk) → DID→BRI (train)
+        // This is 1 change (one train connection), not 2
+        assert!(
+            !journeys.is_empty(),
+            "Should find walk-then-train journey with max_changes: 1"
+        );
+
+        // Verify the journey structure
+        let journey = &journeys[0];
+        assert_eq!(journey.segments().len(), 3, "Expected Train + Walk + Train");
+        assert!(
+            matches!(journey.segments()[0], Segment::Train(_)),
+            "First segment should be train"
+        );
+        assert!(
+            matches!(journey.segments()[1], Segment::Walk(_)),
+            "Second segment should be walk"
+        );
+        assert!(
+            matches!(journey.segments()[2], Segment::Train(_)),
+            "Third segment should be train"
         );
     }
 }

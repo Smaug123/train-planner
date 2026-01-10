@@ -1,10 +1,13 @@
-//! BFS fallback for 3+ change journeys.
+//! BFS fallback search.
 //!
-//! This module implements a forward BFS search that is used when the arrivals-first
-//! approach needs to find journeys with more than 2 changes. The key optimization
-//! is that whenever we reach a feeder station (one with direct service to the
-//! destination), we can complete the journey via the ArrivalsIndex without further
-//! exploration.
+//! This module implements a forward BFS search that is used when:
+//! 1. `max_changes > 2` — the arrivals-first approach only handles up to 2 changes
+//! 2. Insufficient results found — the ArrivalsIndex may be incomplete (e.g., busy
+//!    destination with limited arrivals), so BFS explores paths not in the index
+//!
+//! The key optimization is that whenever we reach a feeder station (one with direct
+//! service to the destination), we can complete the journey via the ArrivalsIndex
+//! without further exploration.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,12 +45,15 @@ pub struct BfsParams<'a> {
     pub start_time: RailTime,
 }
 
-/// Run BFS fallback search for 3+ change journeys.
+/// Run BFS fallback search.
 ///
-/// This is called when arrivals-first search hasn't found enough journeys
-/// and max_changes > 2. It uses forward BFS but with a key optimization:
-/// whenever we reach a feeder station, we can complete the journey via
-/// the ArrivalsIndex without further exploration.
+/// This is called when arrivals-first search needs additional exploration:
+/// - `max_changes > 2`: arrivals-first only handles up to 2 changes directly
+/// - `journeys.len() < max_results`: ArrivalsIndex may be incomplete
+///
+/// Uses forward BFS with a key optimization: whenever we reach a feeder
+/// station, we can complete the journey via the ArrivalsIndex without
+/// further exploration.
 pub async fn find_bfs_journeys<P: ServiceProvider>(
     params: &BfsParams<'_>,
     index: &ArrivalsIndex,
