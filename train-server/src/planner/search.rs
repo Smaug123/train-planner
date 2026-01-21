@@ -251,8 +251,13 @@ impl<'a, P: ServiceProvider> Planner<'a, P> {
             api_calls += calls;
         }
 
-        // Phase 5: BFS fallback for 3+ change journeys
-        if self.config.max_changes > 2 {
+        // Phase 5: BFS fallback
+        // Run BFS when:
+        // - max_changes > 2 (for 3+ change journeys), OR
+        // - we haven't found enough results (ArrivalsIndex might be incomplete)
+        let need_bfs_fallback =
+            self.config.max_changes > 2 || journeys.len() < self.config.max_results;
+        if need_bfs_fallback && self.config.max_changes >= 1 {
             let bfs_params = BfsParams {
                 current_service: &request.current_service,
                 current_position: request.current_position,
@@ -877,13 +882,26 @@ mod proptests {
     }
 
     /// Mock provider that serves from pre-configured data.
+    /// Simulates Darwin API behavior: services sorted by time, limited by max_rows.
     struct TestProvider {
+        /// Departures at each station, sorted by departure time.
         departures: HashMap<Crs, Vec<Arc<Service>>>,
+        /// Arrivals at each station, sorted by arrival time.
         arrivals: HashMap<Crs, Vec<Arc<Service>>>,
+        /// Maximum arrivals to return (simulates Darwin num_rows limit).
+        max_arrivals: usize,
     }
 
     impl TestProvider {
         fn new(services: &[Arc<Service>]) -> Self {
+            Self::with_max_arrivals(services, usize::MAX)
+        }
+
+        /// Create provider with limited arrivals but unlimited departures.
+        /// This simulates the real-world scenario: busy destination has many
+        /// arrivals (filling the limit), but intermediate stations have fewer
+        /// departures (all available).
+        fn with_max_arrivals(services: &[Arc<Service>], max_arrivals: usize) -> Self {
             let mut departures: HashMap<Crs, Vec<Arc<Service>>> = HashMap::new();
             let mut arrivals: HashMap<Crs, Vec<Arc<Service>>> = HashMap::new();
 
@@ -910,9 +928,30 @@ mod proptests {
                 }
             }
 
+            // Sort departures by departure time at each station
+            for (station, station_services) in departures.iter_mut() {
+                station_services.sort_by_key(|s| {
+                    s.calls
+                        .iter()
+                        .find(|c| c.station == *station)
+                        .and_then(|c| c.expected_departure())
+                });
+            }
+
+            // Sort arrivals by arrival time at each station
+            for (station, station_services) in arrivals.iter_mut() {
+                station_services.sort_by_key(|s| {
+                    s.calls
+                        .iter()
+                        .find(|c| c.station == *station)
+                        .and_then(|c| c.expected_arrival())
+                });
+            }
+
             Self {
                 departures,
                 arrivals,
+                max_arrivals,
             }
         }
     }
@@ -923,6 +962,8 @@ mod proptests {
             station: &Crs,
             _after: RailTime,
         ) -> Result<Vec<Arc<Service>>, SearchError> {
+            // Departures are unlimited - intermediate stations typically have
+            // fewer services than a busy destination's arrivals
             Ok(self.departures.get(station).cloned().unwrap_or_default())
         }
 
@@ -931,7 +972,12 @@ mod proptests {
             station: &Crs,
             _after: RailTime,
         ) -> Result<Vec<Arc<Service>>, SearchError> {
-            Ok(self.arrivals.get(station).cloned().unwrap_or_default())
+            // Arrivals are limited to simulate Darwin's num_rows constraint
+            Ok(self
+                .arrivals
+                .get(station)
+                .map(|s| s.iter().take(self.max_arrivals).cloned().collect())
+                .unwrap_or_default())
         }
     }
 
@@ -1021,7 +1067,7 @@ mod proptests {
                     segments: vec![Segment::Train(leg.clone()), Segment::Walk(walk)],
                     station: walkable_station,
                     available_time: arrival_time + walk_time + min_connection,
-                    changes: 1,
+                    changes: 0, // Walks don't count as changes
                 });
             }
         }
@@ -1239,14 +1285,22 @@ mod proptests {
     ///
     /// Note: this is weaker than "finds all journeys"—a single early
     /// journey can satisfy multiple naive arrival times.
+    ///
+    /// The `max_rows` parameter simulates Darwin's num_rows limit. When set,
+    /// arrivals-first sees a limited view while naive BFS sees all services.
+    /// This tests that arrivals-first handles incomplete ArrivalsIndex correctly.
     fn arrivals_first_dominates_naive_arrival_times(
         services: Vec<Arc<Service>>,
         request: SearchRequest,
+        max_rows: usize,
     ) -> Result<(), TestCaseError> {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on(async {
-            let provider = TestProvider::new(&services);
+            // Naive BFS uses unlimited provider - it represents "all possible journeys"
+            let unlimited_provider = TestProvider::new(&services);
+            // Arrivals-first uses limited arrivals - simulates busy destination
+            let limited_provider = TestProvider::with_max_arrivals(&services, max_rows);
             let walkable = WalkableConnections::new();
             let config = SearchConfig {
                 max_changes: 2,
@@ -1254,11 +1308,12 @@ mod proptests {
                 ..SearchConfig::default()
             };
 
-            // Run naive BFS
-            let naive_journeys = naive_bfs_search(&provider, &walkable, &config, &request).await?;
+            // Run naive BFS with unlimited view
+            let naive_journeys =
+                naive_bfs_search(&unlimited_provider, &walkable, &config, &request).await?;
 
-            // Run arrivals-first search
-            let planner = Planner::new(&provider, &walkable, &config);
+            // Run arrivals-first with limited view
+            let planner = Planner::new(&limited_provider, &walkable, &config);
             let arrivals_first_result = planner.search(&request).await?;
 
             // For each journey found by naive BFS, check that arrivals-first
@@ -1323,9 +1378,21 @@ mod proptests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
+        /// Test with unlimited arrivals - basic correctness.
         #[test]
         fn arrivals_first_complete((services, request, _dest) in scenario_strategy()) {
-            arrivals_first_dominates_naive_arrival_times(services, request)?;
+            arrivals_first_dominates_naive_arrival_times(services, request, usize::MAX)?;
+        }
+
+        /// Test with limited arrivals - simulates Darwin's num_rows limit.
+        /// This catches bugs where arrivals-first stops at feeder stations
+        /// even when the ArrivalsIndex doesn't have valid connections.
+        #[test]
+        fn arrivals_first_complete_with_limited_arrivals(
+            (services, request, _dest) in scenario_strategy(),
+            max_rows in 2usize..=5
+        ) {
+            arrivals_first_dominates_naive_arrival_times(services, request, max_rows)?;
         }
     }
 
@@ -1417,6 +1484,79 @@ mod proptests {
             "Arrivals-first best ({:?}) should be <= naive best ({:?})",
             af_best,
             naive_best
+        );
+    }
+
+    /// Walks before first connection should not count as a change.
+    ///
+    /// Regression test: naive_bfs_search previously set `changes: 1` for initial
+    /// walk states, which would incorrectly exclude valid 1-change journeys that
+    /// require walking before the first train connection.
+    #[tokio::test]
+    async fn walk_before_first_connection_does_not_count_as_change() {
+        // Network setup:
+        // - Current train goes PAD -> OXF only
+        // - No direct service from OXF to destination BRI
+        // - But DID (walkable from OXF) has a train to BRI
+        // With max_changes: 1, the journey Train→Walk→Train should be found
+        // because the walk doesn't count as a change.
+
+        let current_train = make_service(
+            0,
+            vec![
+                (0, 0, 600), // PAD depart 10:00
+                (4, 630, 0), // OXF arrive 10:30
+            ],
+        );
+
+        // DID -> BRI (only reachable by walking from OXF)
+        let connecting_train = make_service(
+            1,
+            vec![
+                (5, 0, 650), // DID depart 10:50
+                (3, 720, 0), // BRI arrive 12:00
+            ],
+        );
+
+        let services = vec![current_train.clone(), connecting_train];
+        let provider = TestProvider::new(&services);
+
+        // OXF -> DID is walkable (10 minutes)
+        let mut walkable = WalkableConnections::new();
+        walkable.add(crs("OXF"), crs("DID"), 10);
+
+        let config = SearchConfig {
+            max_changes: 1, // Key: only 1 change allowed
+            ..SearchConfig::default()
+        };
+
+        let request = SearchRequest::new(current_train, CallIndex(0), crs("BRI"));
+
+        let journeys = naive_bfs_search(&provider, &walkable, &config, &request)
+            .await
+            .unwrap();
+
+        // Should find: PAD→OXF (train) → OXF→DID (walk) → DID→BRI (train)
+        // This is 1 change (one train connection), not 2
+        assert!(
+            !journeys.is_empty(),
+            "Should find walk-then-train journey with max_changes: 1"
+        );
+
+        // Verify the journey structure
+        let journey = &journeys[0];
+        assert_eq!(journey.segments().len(), 3, "Expected Train + Walk + Train");
+        assert!(
+            matches!(journey.segments()[0], Segment::Train(_)),
+            "First segment should be train"
+        );
+        assert!(
+            matches!(journey.segments()[1], Segment::Walk(_)),
+            "Second segment should be walk"
+        );
+        assert!(
+            matches!(journey.segments()[2], Segment::Train(_)),
+            "Third segment should be train"
         );
     }
 }
